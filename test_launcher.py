@@ -240,12 +240,13 @@ class LauncherTests(unittest.TestCase):
             [str(exe)],
         )
 
-    def test_crmp_client_does_not_pass_an_empty_rcon_password(self):
+    def test_crmp_passwordless_launch_does_not_pass_optional_password_or_nickname_flags(self):
         exe = Path("multiplayer_c/multiplayer_browser_cr.exe")
-        self.assertEqual(
-            build_launch_command(exe, "188.127.241.8", 1130, "Player_Name"),
-            [str(exe), "188.127.241.8:1130", "-n", "Player_Name"],
-        )
+        command = build_launch_command(exe, "188.127.241.8", 1130, "Player_Name")
+
+        self.assertEqual(command, [str(exe), "188.127.241.8:1130"])
+        self.assertNotIn("-z", command, "a passwordless server must not receive a server-password switch")
+        self.assertNotIn("-n", command, "CR:MP reads nickname from HKCU\\Software\\SAMP")
 
     def test_direct_helper_uses_the_explicit_executable_passed_by_launcher(self):
         source = Path(__file__).with_name("direct_launcher.cs").read_text(encoding="utf-8")
