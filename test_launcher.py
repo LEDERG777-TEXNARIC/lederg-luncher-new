@@ -306,8 +306,10 @@ class LauncherTests(unittest.TestCase):
             multiplayer.mkdir()
             extra_copy = multiplayer / "d3dx9_25.dll"
             extra_copy.write_bytes(source.read_bytes())
+            local_appdata = Path(temp) / "localappdata"
 
-            installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
+            with patch.dict("os.environ", {"LOCALAPPDATA": str(local_appdata)}):
+                installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
 
             self.assertEqual(installed, (root / "d3dx9_25.dll").resolve())
             self.assertTrue(installed.is_file())
@@ -316,6 +318,9 @@ class LauncherTests(unittest.TestCase):
                 launcher.LEGACY_D3DX_SHA256,
             )
             self.assertFalse(extra_copy.exists(), "multiplayer_c must not contain this launcher-added DLL")
+            backups = list((local_appdata / "LEDERG CRMP" / "quarantine").glob("d3dx9_25.dll.*.backup"))
+            self.assertEqual(len(backups), 1, "the removed file must be preserved outside the game")
+            self.assertEqual(backups[0].read_bytes(), source.read_bytes())
 
     def test_legacy_d3dx_dependency_replaces_a_corrupt_local_copy(self):
         bundle_root = Path(__file__).parent
