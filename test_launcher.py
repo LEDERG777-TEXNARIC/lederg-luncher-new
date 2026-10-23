@@ -345,6 +345,16 @@ class LauncherTests(unittest.TestCase):
                 expected_hash,
             )
 
+    def test_legacy_d3dx_dependency_refuses_an_unverified_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle_root = Path(temp)
+            (bundle_root / "dependencies").mkdir()
+            (bundle_root / "dependencies" / "d3dx9_25.dll").write_bytes(b"fake DLL")
+            with self.assertRaises(ValueError):
+                ensure_legacy_directx_dependency(
+                    bundle_root / "game", bundle_root=bundle_root
+                )
+
     def test_direct_launch_targets_game_and_multiplayer_dll_not_the_browser(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "GTA Criminal Russia"
