@@ -202,7 +202,11 @@ internal static class Program
 
             using (RegistryKey key = Registry.CurrentUser.CreateSubKey(@"Software\SAMP"))
             {
-                if (key != null) key.SetValue("PlayerName", nickname, RegistryValueKind.String);
+                if (key != null)
+            {
+                key.SetValue("PlayerName", nickname, RegistryValueKind.String);
+                key.SetValue("gta_sa_exe", game, RegistryValueKind.String);
+            }
             }
 
             // The multiplayer DLL reads the same native SA-MP-style startup flags

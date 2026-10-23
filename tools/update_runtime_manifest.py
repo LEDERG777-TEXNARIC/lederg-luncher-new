@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "2.1.3"
+VERSION = "2.1.4"
 FILES = (
     "client_updates.py",
     "radio_sync.py",

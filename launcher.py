@@ -13,6 +13,7 @@ import socket
 import stat
 import sys
 import subprocess
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -46,9 +47,12 @@ PARALLEL_DOWNLOAD_MIN_SIZE = 32 * 1024 * 1024
 DEFAULT_CLIENT_EXPANDED_SIZE = 6 * 1024 * 1024 * 1024
 SERVER_HOST = "188.127.241.8"
 SERVER_PORT = 1130
-DEFAULT_LAUNCH_MODE = "direct"
+DEFAULT_LAUNCH_MODE = "samp-cli"
 DEFAULT_CLIENT_EXECUTABLE = "multiplayer_c/multiplayer_browser_cr.exe"
 DIRECT_LAUNCHER_NAME = "LEDERG-DirectLaunch.exe"
+LEGACY_D3DX_DLL_NAME = "d3dx9_25.dll"
+LEGACY_D3DX_SHA256 = "4c54df27ce84d21b2924e64ff79b13e7876ce85d8e0c9c1d0abd8da73888187a"
+DIRECTX_LEGACY_RUNTIME_URL = "https://www.microsoft.com/en-us/download/details.aspx?id=8109"
 
 BG = "#000000"
 BG_SOFT = "#050505"
@@ -437,6 +441,109 @@ def write_launcher_log(message: str) -> None:
             stream.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
     except OSError:
         pass
+
+
+def samp_registry_values(game_root: Path, nickname: str = "LEDERG") -> dict[str, str]:
+    """Build the SA-MP-compatible registry values used by Multiplayer adaptation."""
+    root = Path(game_root).resolve()
+    game = root / "gta_sa.exe"
+    if not game.is_file():
+        raise FileNotFoundError(f"Не найден файл игры: {game}")
+    return {
+        "gta_sa_exe": str(game),
+        "PlayerName": sanitize_nickname(nickname),
+    }
+
+
+def register_samp_game(game_root: Path, nickname: str = "LEDERG") -> dict[str, str]:
+    """Register the exact game executable so adaptation.dll can determine game type."""
+    values = samp_registry_values(game_root, nickname)
+    try:
+        import winreg
+    except ImportError as exc:
+        raise OSError("Регистрация пути игры поддерживается только в Windows.") from exc
+    with winreg.CreateKeyEx(
+        winreg.HKEY_CURRENT_USER,
+        r"Software\\SAMP",
+        0,
+        winreg.KEY_SET_VALUE,
+    ) as key:
+        for name, value in values.items():
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+    write_launcher_log(
+        f"Registered SA-MP game path: gta_sa_exe={values['gta_sa_exe']}; "
+        f"PlayerName={values['PlayerName']}."
+    )
+    return values
+
+
+def ensure_legacy_directx_dependency(
+    game_root: Path,
+    *,
+    bundle_root: Path | None = None,
+) -> Path:
+    """Install only the verified x86 D3DX9 dependency required by the shipped client."""
+    root = Path(game_root).resolve()
+    destination = root / LEGACY_D3DX_DLL_NAME
+    targets = [destination]
+    multiplayer_dir = root / "multiplayer_c"
+    if multiplayer_dir.is_dir():
+        targets.append(multiplayer_dir / LEGACY_D3DX_DLL_NAME)
+
+    def digest(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    if all(
+        target.is_file() and digest(target) == LEGACY_D3DX_SHA256
+        for target in targets
+    ):
+        return destination
+
+    if bundle_root is None:
+        bundle_root = Path(
+            getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
+        )
+    source = Path(bundle_root) / "dependencies" / LEGACY_D3DX_DLL_NAME
+    if not source.is_file():
+        raise FileNotFoundError(
+            f"Не найдена обязательная библиотека {LEGACY_D3DX_DLL_NAME}. "
+            f"Переустанови актуальный LEDERG CR:MP. "
+            f"Официальный пакет Microsoft DirectX: {DIRECTX_LEGACY_RUNTIME_URL}"
+        )
+    if digest(source) != LEGACY_D3DX_SHA256:
+        raise ValueError(
+            f"Проверка SHA-256 библиотеки {LEGACY_D3DX_DLL_NAME} не пройдена; "
+            "файл не будет скопирован."
+        )
+
+    root.mkdir(parents=True, exist_ok=True)
+    for target in targets:
+        if target.is_file() and digest(target) == LEGACY_D3DX_SHA256:
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        handle, temp_name = tempfile.mkstemp(
+            prefix=".lederg-d3dx-", suffix=".tmp", dir=str(target.parent)
+        )
+        os.close(handle)
+        temporary = Path(temp_name)
+        try:
+            shutil.copyfile(source, temporary)
+            if digest(temporary) != LEGACY_D3DX_SHA256:
+                raise ValueError("Контрольная сумма D3DX9 изменилась при копировании.")
+            os.replace(temporary, target)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        write_launcher_log(
+            f"Installed verified legacy DirectX dependency: {target}; SHA-256={LEGACY_D3DX_SHA256}."
+        )
+    return destination
 
 
 def connect_via_browser_ui(executable: Path, host: str, port: int, nickname: str = "LEDERG") -> subprocess.Popen:
@@ -2140,25 +2247,27 @@ class LedgerLauncher(tk.Tk):
             self.server_host, self.server_port = load_server_address(self.server_cache_file)
             root = game_root_for(client)
             launch_mode = getattr(self, "launch_mode", DEFAULT_LAUNCH_MODE)
-            if launch_mode == "direct":
-                game_client = find_direct_game_client(root)
-                if not game_client:
+            if launch_mode in {"direct", "samp-cli"}:
+                # Use the client's own bootstrapper: it selects the correct game
+                # image and initializes Multiplayer adaptation before connecting.
+                register_samp_game(root, nickname)
+                dependency = ensure_legacy_directx_dependency(root)
+                game_client = find_client(root, DEFAULT_CLIENT_EXECUTABLE)
+                if game_client is None:
                     raise FileNotFoundError(
-                        "Не найден исполняемый модуль CR:MP: "
-                        "multiplayer_c/grand_theft_auto_san_andreas.dll.\n\n"
-                        "Открой «Переустановить / восстановить клиент» и проверь файлы игры. "
-                        "Браузер серверов не будет запускаться как запасной вариант."
+                        "Не найден штатный клиент multiplayer_c/multiplayer_browser_cr.exe. "
+                        "Запусти «Скачать / восстановить файлы»."
                     )
-                command = build_direct_game_command(
-                    game_client, self.server_host, self.server_port, nickname
+                command = build_launch_command(
+                    game_client, self.server_host, self.server_port, nickname, "samp-cli"
                 )
                 write_launcher_log(
-                    f"Starting native CR:MP runtime; executable={game_client}; "
-                    f"cwd={root}; endpoint={self.server_host}:{self.server_port}; "
-                    f"nickname={nickname}"
+                    f"Starting official CR:MP bootstrapper: executable={game_client}; "
+                    f"DirectX={dependency}; cwd={root}; "
+                    f"endpoint={self.server_host}:{self.server_port}; nickname={nickname}"
                 )
                 self.status_text = (
-                    f"ПОДКЛЮЧАЮ К {self.server_host}:{self.server_port} — ПРЯМОЙ ЗАПУСК"
+                    f"ПОДКЛЮЧАЮ К {self.server_host}:{self.server_port} — ШТАТНЫЙ ЗАПУСК"
                 )
                 self.draw()
                 self.game_process = subprocess.Popen(
@@ -2166,7 +2275,7 @@ class LedgerLauncher(tk.Tk):
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
                 )
                 write_launcher_log(
-                    f"Native CR:MP process started; pid={self.game_process.pid}"
+                    f"Official CR:MP bootstrapper started; pid={self.game_process.pid}"
                 )
             elif launch_mode == "browser-ui":
                 self.status_text = f"ОТКРЫВАЮ CR:MP — {self.server_host}:{self.server_port}"

@@ -36,6 +36,8 @@ from launcher import (
     parse_server_address,
     sanitize_nickname,
     safe_extract_zip,
+    ensure_legacy_directx_dependency,
+    samp_registry_values,
 )
 
 
@@ -113,8 +115,8 @@ class ParallelRangeTestHandler(RangeTestHandler):
 
 
 class LauncherTests(unittest.TestCase):
-    def test_default_launch_mode_is_direct_and_browser_free(self):
-        self.assertEqual(DEFAULT_LAUNCH_MODE, "direct")
+    def test_default_launch_mode_uses_the_crmp_native_cli(self):
+        self.assertEqual(DEFAULT_LAUNCH_MODE, "samp-cli")
 
     def test_archive_fallback_uses_google_drive_virus_scan_confirmation(self):
         self.assertEqual(
@@ -172,7 +174,7 @@ class LauncherTests(unittest.TestCase):
             return FakeResponse(payload=payload)
 
         release = fetch_release_manifest(fetcher=fake_get)
-        self.assertEqual(release["launch_mode"], "direct")
+        self.assertEqual(release["launch_mode"], "samp-cli")
 
     def test_public_ip_source_is_the_configurable_github_file(self):
         self.assertEqual(
@@ -254,6 +256,91 @@ class LauncherTests(unittest.TestCase):
         self.assertIn('" -c -n " + Quote(nickname)', source)
         self.assertIn('" -h " + host + " -p " + port.ToString(CultureInfo.InvariantCulture)', source)
         self.assertNotIn('Quote(game) + " " + host + ":"', source)
+
+    def test_legacy_direct_play_branch_uses_the_official_client_bootstrap(self):
+        source = Path(__file__).with_name("launcher.py").read_text(encoding="utf-8")
+        start = source.index('if launch_mode in {"direct", "samp-cli"}', source.index("def play("))
+        end = source.index('elif launch_mode == "browser-ui":', start)
+        branch = source[start:end]
+        self.assertIn("build_launch_command(", branch)
+        self.assertNotIn("build_direct_game_command(", branch)
+        self.assertNotIn("build_direct_launcher_command(", branch)
+        self.assertIn("register_samp_game(", branch)
+        self.assertIn("ensure_legacy_directx_dependency(", branch)
+
+    def test_web_play_uses_crmp_bootstrap_instead_of_manual_dll_injection(self):
+        source = Path(__file__).with_name("web_runtime.py").read_text(encoding="utf-8")
+        start = source.index("def launch_game(self, nickname: str)")
+        end = source.index("def _start_xpanel_hotkey(", start)
+        branch = source[start:end]
+        self.assertIn("build_launch_command(", branch)
+        self.assertIn("DEFAULT_CLIENT_EXECUTABLE", branch)
+        self.assertNotIn("build_direct_launcher_command(", branch)
+        self.assertNotIn("CreateRemoteThread", branch)
+
+    def test_direct_helper_registers_the_gta_executable_for_adaptation(self):
+        source = Path(__file__).with_name("direct_launcher.cs").read_text(encoding="utf-8")
+        self.assertIn('key.SetValue("gta_sa_exe", game, RegistryValueKind.String);', source)
+
+    def test_samp_registry_values_register_the_actual_gta_exe_and_clean_nickname(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "GTA Criminal Russia"
+            root.mkdir()
+            game = root / "gta_sa.exe"
+            game.write_bytes(b"MZ")
+
+            values = samp_registry_values(root, " My Nick! ")
+
+            self.assertEqual(values["gta_sa_exe"], str(game.resolve()))
+            self.assertEqual(values["PlayerName"], "My_Nick")
+
+    def test_legacy_d3dx_dependency_is_copied_and_verified(self):
+        bundle_root = Path(__file__).parent
+        source = bundle_root / "dependencies" / "d3dx9_25.dll"
+        self.assertTrue(source.is_file(), "the signed legacy DirectX DLL must be bundled")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "GTA Criminal Russia"
+            root.mkdir()
+            (root / "gta_sa.exe").write_bytes(b"MZ")
+            multiplayer = root / "multiplayer_c"
+            multiplayer.mkdir()
+
+            installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
+
+            self.assertEqual(installed, (root / "d3dx9_25.dll").resolve())
+            self.assertTrue(installed.is_file())
+            self.assertEqual(
+                hashlib.sha256(installed.read_bytes()).hexdigest(),
+                launcher.LEGACY_D3DX_SHA256,
+            )
+            self.assertEqual(
+                hashlib.sha256((multiplayer / "d3dx9_25.dll").read_bytes()).hexdigest(),
+                launcher.LEGACY_D3DX_SHA256,
+            )
+
+    def test_legacy_d3dx_dependency_replaces_a_corrupt_local_copy(self):
+        bundle_root = Path(__file__).parent
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            destination = root / "d3dx9_25.dll"
+            destination.write_bytes(b"not the DirectX DLL")
+
+            installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
+
+            self.assertEqual(
+                hashlib.sha256(installed.read_bytes()).hexdigest(),
+                launcher.LEGACY_D3DX_SHA256,
+            )
+
+    def test_legacy_d3dx_dependency_refuses_an_unverified_source(self):
+        with tempfile.TemporaryDirectory() as temp:
+            bundle_root = Path(temp)
+            (bundle_root / "dependencies").mkdir()
+            (bundle_root / "dependencies" / "d3dx9_25.dll").write_bytes(b"fake DLL")
+            with self.assertRaises(ValueError):
+                ensure_legacy_directx_dependency(
+                    bundle_root / "game", bundle_root=bundle_root
+                )
 
     def test_direct_launch_targets_game_and_multiplayer_dll_not_the_browser(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -549,11 +636,15 @@ class LauncherTests(unittest.TestCase):
             dll.write_bytes(b"MZ")
             self.assertEqual(find_injected_multiplayer_dll(root), dll)
 
-    def test_web_launcher_uses_direct_helper_instead_of_runtime_dll_command(self):
+    def test_web_launcher_uses_official_bootstrap_cli_instead_of_manual_injection(self):
         source = Path(__file__).with_name("web_runtime.py").read_text(encoding="utf-8")
-        self.assertIn("command = build_direct_launcher_command(", source)
-        self.assertIn("helper = direct_launcher_path()", source)
-        self.assertNotIn("command = build_direct_game_command(runtime", source)
+        start = source.index("def launch_game(self, nickname: str)")
+        end = source.index("def _start_xpanel_hotkey(", start)
+        branch = source[start:end]
+        self.assertIn("command = build_launch_command(", branch)
+        self.assertIn('"samp-cli"', branch)
+        self.assertNotIn("build_direct_launcher_command(", branch)
+        self.assertNotIn("CreateRemoteThread", branch)
 
 
 if __name__ == "__main__":

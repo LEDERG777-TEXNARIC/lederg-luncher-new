@@ -28,10 +28,15 @@ from launcher import (
     ZIP_SIZE,
     ZIP_URL,
     build_direct_launcher_command,
+    build_launch_command,
     direct_launcher_path,
+    find_child_game_pid,
+    is_process_running,
     download_archive,
     download_client_folder,
     ensure_install_space,
+    ensure_legacy_directx_dependency,
+    register_samp_game,
     fetch_release_manifest,
     find_client,
     find_injected_multiplayer_dll,
@@ -213,6 +218,7 @@ class LauncherApi:
         self._current_file = ""
         self._error = ""
         self._process: subprocess.Popen | None = None
+        self._game_pid: int | None = None
         self._xpanel_stop: threading.Event | None = None
         self._game_root: Path | None = None
         self._endpoint = f"{SERVER_HOST}:{SERVER_PORT}"
@@ -406,34 +412,46 @@ class LauncherApi:
         with self._lock:
             if self._busy:
                 return {"ok": False, "message": "Дождись завершения текущей операции."}
+            tracked_game_pid = self._game_pid
+            active_process = self._process
             root = self._game_root
             endpoint = self._endpoint
+        if tracked_game_pid and is_process_running(tracked_game_pid):
+            return {"ok": False, "message": "CR:MP уже запущен."}
+        if active_process is not None and active_process.poll() is None:
+            return {"ok": False, "message": "Запуск CR:MP уже выполняется."}
         if not root:
             return {"ok": False, "message": "Не найдена папка игры. Выбери папку или скачай клиент."}
+
+        game = root / "gta_sa.exe"
         multiplayer_dll = find_injected_multiplayer_dll(root)
-        if not (root / "gta_sa.exe").is_file() or not multiplayer_dll:
+        client = find_client(root, DEFAULT_CLIENT_EXECUTABLE)
+        if not game.is_file() or not multiplayer_dll or client is None:
             return {
                 "ok": False,
                 "message": (
-                    "Не найден gta_sa.exe или san_andreas_multiplayer.dll. "
-                    "Нажми «Скачать / восстановить файлы» для проверки клиента."
+                    "Не найден полный CR:MP-клиент: нужны gta_sa.exe, "
+                    "multiplayer_c/multiplayer_browser_cr.exe и multiplayer DLL. "
+                    "Нажми «Скачать / восстановить файлы»."
                 ),
             }
+
+        process = None
         try:
-            helper = direct_launcher_path()
-            if not helper.is_file():
-                raise FileNotFoundError(
-                    "Не найден встроенный LEDERG-DirectLaunch.exe. "
-                    "Скачай актуальную сборку лаунчера из GitHub Actions."
-                )
             host, port = parse_server_address(endpoint)
-            command = build_direct_launcher_command(
-                helper, root, host, port, self._nickname
+            # Always let the supplied client bootstrap initialize game type and
+            # Multiplayer adaptation. Injecting san_andreas_multiplayer.dll into
+            # gta_sa.exe bypasses that initialization and produces the reported error.
+            registered = register_samp_game(root, self._nickname)
+            dependency = ensure_legacy_directx_dependency(root)
+            command = build_launch_command(
+                client, host, port, self._nickname, "samp-cli"
             )
             write_launcher_log(
-                f"Direct-connect helper launch: helper={helper}; game={root / 'gta_sa.exe'}; "
-                f"dll={multiplayer_dll}; cwd={root}; endpoint={host}:{port}; "
-                f"nickname={self._nickname}"
+                f"Starting supported CR:MP bootstrapper: executable={client}; "
+                f"game={game}; multiplayer_dll={multiplayer_dll}; DirectX={dependency}; "
+                f"registry_game={registered['gta_sa_exe']}; cwd={root}; "
+                f"endpoint={host}:{port}; nickname={self._nickname}; command={command!r}"
             )
             process = subprocess.Popen(
                 command,
@@ -443,32 +461,71 @@ class LauncherApi:
                 stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
+
+            # multiplayer_browser_cr.exe creates the actual runtime process and may
+            # then exit normally. Capture its child PID before starting monitoring.
+            game_pid = None
+            deadline = time.monotonic() + 7.0
+            while time.monotonic() < deadline:
+                candidate = find_child_game_pid(process.pid)
+                if candidate and is_process_running(candidate):
+                    game_pid = candidate
+                    break
+                time.sleep(0.1)
+
+            if process.poll() is not None and game_pid is None:
+                raise RuntimeError(
+                    "Штатный загрузчик CR:MP закрылся, но игровой процесс не появился. "
+                    f"Код выхода: {process.returncode}. Проверь файлы клиента."
+                )
+
             with self._lock:
                 self._process = process
-                self._status = f"Прямой запуск CR:MP; адрес {host}:{port}; PID {process.pid}."
+                self._game_pid = game_pid
+                self._status = (
+                    f"CR:MP запущен — {host}:{port}; игровой PID "
+                    f"{game_pid if game_pid else 'ожидание'}."
+                )
                 self._phase = "ready"
                 self._error = ""
             write_launcher_log(
-                f"Direct-connect helper started: pid={process.pid}; endpoint={host}:{port}"
+                f"CR:MP bootstrap started; bootstrap_pid={process.pid}; "
+                f"game_pid={game_pid}; endpoint={host}:{port}."
             )
-            self._start_xpanel_hotkey(process, root)
+            self._start_xpanel_hotkey(process, root, game_pid)
             threading.Thread(
-                target=self._monitor_process, args=(process,), daemon=True
+                target=self._monitor_process,
+                args=(process, root, game_pid),
+                daemon=True,
+                name="LEDERG-game-monitor",
             ).start()
             return {
                 "ok": True,
-                "message": f"Запускаю игру напрямую и подключаю к серверу {host}:{port}.",
+                "message": (
+                    f"Запускаю штатный CR:MP и подключаю к серверу {host}:{port}."
+                    if game_pid
+                    else f"Штатный CR:MP запущен; ожидаю игровой процесс для подключения к {host}:{port}."
+                ),
             }
         except Exception as exc:
+            if process is not None and process.poll() is None:
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
             write_launcher_log(f"ERROR launching game: {traceback.format_exc()}")
             with self._lock:
+                self._process = None
+                self._game_pid = None
                 self._phase = "error"
                 self._error = str(exc)
-                self._status = "Ошибка прямого запуска клиента."
-            return {"ok": False, "message": f"Не удалось запустить CR:MP напрямую: {exc}"}
+                self._status = "Ошибка запуска CR:MP."
+            return {"ok": False, "message": f"Не удалось запустить CR:MP: {exc}"}
 
-    def _start_xpanel_hotkey(self, process: subprocess.Popen, root: Path) -> None:
-        """Start an X-key watcher tied to this game process; never global-type elsewhere."""
+    def _start_xpanel_hotkey(
+        self, process: subprocess.Popen, root: Path, game_pid: int | None = None
+    ) -> None:
+        """Keep the X hotkey alive after the bootstrapper hands off to the game."""
         previous = self._xpanel_stop
         if previous is not None:
             previous.set()
@@ -476,23 +533,29 @@ class LauncherApi:
         self._xpanel_stop = stop_event
         threading.Thread(
             target=self._watch_xpanel_hotkey,
-            args=(process, root, stop_event),
+            args=(process, root, stop_event, game_pid),
             daemon=True,
             name="LEDERG-X-panel-hotkey",
         ).start()
         write_launcher_log(
-            f"X hotkey watcher started for CR:MP PID {process.pid}; "
-            "only sends /xpanel when that exact game process is foreground."
+            f"X hotkey watcher started; bootstrap PID={process.pid}; game PID={game_pid}."
         )
 
     def _watch_xpanel_hotkey(
-        self, process: subprocess.Popen, root: Path, stop_event: threading.Event
+        self,
+        process: subprocess.Popen,
+        root: Path,
+        stop_event: threading.Event,
+        game_pid: int | None = None,
     ) -> None:
         was_down = False
         try:
             user32 = ctypes.windll.user32
+            tracked_game_pid = game_pid
             while not stop_event.wait(0.025):
-                if process.poll() is not None:
+                if tracked_game_pid is None:
+                    tracked_game_pid = find_child_game_pid(process.pid)
+                if process.poll() is not None and not is_process_running(tracked_game_pid):
                     break
                 key_down = bool(int(user32.GetAsyncKeyState(VK_X)) & 0x8000)
                 foreground_game_pid = _foreground_game_process_id(root, process.pid)
@@ -500,15 +563,15 @@ class LauncherApi:
                     key_down=key_down,
                     was_down=was_down,
                     foreground_pid=foreground_game_pid,
-                    game_pid=foreground_game_pid,
+                    game_pid=tracked_game_pid,
                 ):
                     write_launcher_log(
-                        f"Physical X pressed in foreground CR:MP window (pid={foreground_game_pid}); "
-                        f"launched runtime pid={process.pid}; sending /xpanel."
+                        f"Physical X pressed in CR:MP window (game pid={tracked_game_pid}); "
+                        "sending /xpanel."
                     )
-                    if not _type_xpanel_command(foreground_game_pid):
+                    if not _type_xpanel_command(tracked_game_pid):
                         write_launcher_log(
-                            f"Could not send /xpanel for game pid {process.pid}; "
+                            f"Could not send /xpanel for game pid {tracked_game_pid}; "
                             "use the /xpanel chat command as a fallback."
                         )
                 was_down = key_down
@@ -517,16 +580,37 @@ class LauncherApi:
         finally:
             if self._xpanel_stop is stop_event:
                 self._xpanel_stop = None
-            write_launcher_log(f"X hotkey watcher stopped for CR:MP PID {process.pid}.")
+            write_launcher_log(f"X hotkey watcher stopped for CR:MP bootstrap PID {process.pid}.")
 
-    def _monitor_process(self, process: subprocess.Popen) -> None:
+    def _monitor_process(
+        self, process: subprocess.Popen, root: Path, game_pid: int | None = None
+    ) -> None:
         try:
             code = process.wait()
+            tracked_game_pid = game_pid
+            if tracked_game_pid is None:
+                deadline = time.monotonic() + 7.0
+                while time.monotonic() < deadline:
+                    candidate = find_child_game_pid(process.pid)
+                    if candidate and is_process_running(candidate):
+                        tracked_game_pid = candidate
+                        break
+                    time.sleep(0.1)
+            if tracked_game_pid and is_process_running(tracked_game_pid):
+                with self._lock:
+                    if self._process is process:
+                        self._game_pid = tracked_game_pid
+                write_launcher_log(
+                    f"CR:MP bootstrap exited with code={code}; waiting for game PID={tracked_game_pid}."
+                )
+                while is_process_running(tracked_game_pid):
+                    time.sleep(0.5)
             if self._xpanel_stop is not None and self._process is process:
                 self._xpanel_stop.set()
             with self._lock:
                 if self._process is process:
                     self._process = None
+                    self._game_pid = None
                     if code == 0:
                         self._status = "Игровой клиент закрылся."
                         self._phase = "ready" if self.get_state()["client_ready"] else "idle"
@@ -534,7 +618,10 @@ class LauncherApi:
                         self._status = f"Клиент завершился с кодом {code}. Смотри журнал."
                         self._phase = "error"
                         self._error = self._status
-            write_launcher_log(f"Native runtime exited: code={code}")
+            write_launcher_log(
+                f"CR:MP bootstrap/game monitoring finished: bootstrap_code={code}; "
+                f"game_pid={tracked_game_pid}."
+            )
         except Exception as exc:
             write_launcher_log(f"Process monitor error: {exc!r}")
 
