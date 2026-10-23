@@ -25,11 +25,13 @@ from launcher import (
     SERVER_HOST,
     SERVER_PORT,
     SERVER_IP_URL,
+    ZIP_SIZE,
     ZIP_URL,
     build_direct_launcher_command,
     direct_launcher_path,
     download_archive,
     download_client_folder,
+    ensure_install_space,
     fetch_release_manifest,
     find_client,
     find_injected_multiplayer_dll,
@@ -37,6 +39,7 @@ from launcher import (
     load_server_address,
     parse_server_address,
     safe_extract_zip,
+    should_use_manifest_update,
     sanitize_nickname,
     write_launcher_log,
 )
@@ -201,6 +204,11 @@ class LauncherApi:
         self._phase = "idle"
         self._status = "Проверяю папку клиента…"
         self._progress = 0.0
+        self._bytes_done = 0
+        self._bytes_total = 0
+        self._speed_bps = 0.0
+        self._progress_last_at = 0.0
+        self._progress_last_done = 0
         self._progress_label = "ПРОВЕРКА"
         self._current_file = ""
         self._error = ""
@@ -311,6 +319,9 @@ class LauncherApi:
             status = self._status
             progress = self._progress
             progress_label = self._progress_label
+            bytes_done = self._bytes_done
+            bytes_total = self._bytes_total
+            speed_bps = self._speed_bps
             current_file = self._current_file
             error = self._error
             endpoint = self._endpoint
@@ -329,6 +340,10 @@ class LauncherApi:
             "status": error or status,
             "progress": progress,
             "progress_label": progress_label,
+            "bytes_done": bytes_done,
+            "bytes_total": bytes_total,
+            "speed_bps": round(speed_bps, 1),
+            "eta_seconds": int(max(0, bytes_total - bytes_done) / speed_bps) if speed_bps > 1 else None,
             "current_file": current_file,
             "browser_found": bool(browser),
         }
@@ -534,17 +549,43 @@ class LauncherApi:
             self._phase = "manifest"
             self._status = "Получаю проверенный манифест клиента…"
             self._progress = 0.0
+            self._bytes_done = 0
+            self._bytes_total = 0
+            self._speed_bps = 0.0
+            self._progress_last_at = time.monotonic()
+            self._progress_last_done = 0
             self._progress_label = "ПОДГОТОВКА"
             self._error = ""
         threading.Thread(target=self._install_worker, args=(selected,), daemon=True, name="LEDERG-install").start()
         return {"ok": True, "message": "Проверка и установка клиента запущены."}
 
     def _set_progress(self, phase: str, done: int, total: int, label: str) -> None:
+        now = time.monotonic()
+        done = max(0, int(done))
+        total = max(0, int(total))
         with self._lock:
             self._phase = phase
             self._status = label or "Обрабатываю файлы клиента…"
             self._current_file = label or ""
             self._progress = (min(100.0, max(0.0, float(done) * 100.0 / float(total))) if total else 0.0)
+            self._bytes_done = done if phase == "download" else 0
+            self._bytes_total = total if phase == "download" else 0
+            if phase != "download":
+                self._speed_bps = 0.0
+                self._progress_last_at = now
+                self._progress_last_done = done
+            else:
+                if done < self._progress_last_done:
+                    self._speed_bps = 0.0
+                    self._progress_last_at = now
+                    self._progress_last_done = done
+                else:
+                    elapsed = now - self._progress_last_at
+                    if elapsed >= 0.35:
+                        instant = max(0.0, (done - self._progress_last_done) / elapsed)
+                        self._speed_bps = instant if self._speed_bps <= 0 else (self._speed_bps * 0.35 + instant * 0.65)
+                        self._progress_last_at = now
+                        self._progress_last_done = done
             if phase == "download":
                 self._progress_label = "ЗАГРУЗКА ФАЙЛОВ"
             elif phase == "extract":
@@ -574,26 +615,43 @@ class LauncherApi:
 
             manifest_url = release.get("files_manifest_url") or CLIENT_FILES_MANIFEST_URL
             manifest = None
-            manifest_error = None
             try:
                 manifest = fetch_files_manifest(manifest_url, http=HTTP)
             except Exception as exc:
-                manifest_error = exc
-                write_launcher_log(f"Client file manifest unavailable; trying verified ZIP fallback: {exc!r}")
+                write_launcher_log(f"Client file manifest unavailable; ZIP route will be used: {exc!r}")
 
-            # The ZIP route is only a fallback for an unavailable manifest. Once
-            # a trusted manifest is fetched, its per-file hashes and resumable
-            # updates remain the source of truth.
-            if manifest is None:
-                install_name = "GTA Criminal Russia"
-                selected_is_game_root = (selected / "gta_sa.exe").is_file()
-                destination = selected.parent if selected_is_game_root or selected.name.casefold() == install_name.casefold() else selected
-                archive_url = release.get("archive_url") or ZIP_URL
+            install_name = str((manifest or {}).get("install_root", release.get("install_root", "GTA Criminal Russia")))
+            selected_is_game_root = (selected / "gta_sa.exe").is_file()
+            destination = (
+                selected.parent
+                if selected_is_game_root or selected.name.casefold() == install_name.casefold()
+                else selected
+            )
+            use_manifest_update = (
+                manifest is not None
+                and should_use_manifest_update(destination, release.get("client_executable"))
+            )
+
+            if not use_manifest_update:
+                # A clean install uses the smaller compressed archive and eight
+                # resumable Range streams. The next launch can reconcile it with
+                # the per-file manifest without re-downloading unchanged assets.
                 with self._lock:
-                    self._status = "Манифест недоступен. Скачиваю резервный ZIP-архив…"
+                    self._status = "Первичная установка: ускоренная загрузка ZIP…"
                     self._phase = "download"
                     self._progress = 0.0
-                    self._progress_label = "ЗАГРУЗКА АРХИВА"
+                    self._bytes_done = 0
+                    self._bytes_total = 0
+                    self._speed_bps = 0.0
+                    self._progress_last_at = time.monotonic()
+                    self._progress_last_done = 0
+                    self._progress_label = "8-WAY RANGE"
+                archive_url = release.get("archive_url") or ZIP_URL
+                ensure_install_space(
+                    destination,
+                    int(release.get("archive_size", 0) or ZIP_SIZE),
+                    int(manifest.get("total_bytes", 0) or 0) if manifest else 0,
+                )
                 archive = download_archive(
                     destination,
                     progress=self._set_progress,
@@ -609,39 +667,38 @@ class LauncherApi:
                 client = find_client(destination, release.get("client_executable"))
                 if not client:
                     raise RuntimeError(
-                        "Архив распакован, но браузер CR:MP не найден. "
-                        "Проверь, что ZIP содержит папку multiplayer_c и игровой клиент."
+                        "Архив распакован, но CR:MP-клиент не найден. "
+                        "Проверь, что ZIP содержит GTA Criminal Russia и multiplayer_c."
                     )
                 root = game_root_for(client)
                 runtime = find_injected_multiplayer_dll(root)
                 if not (root / "gta_sa.exe").is_file() or not runtime:
                     raise RuntimeError(
-                        "В архиве не найден игровой runtime grand_theft_auto_san_andreas.dll. "
-                        "Нужен полный CR:MP-клиент, не только браузер серверов."
+                        "В архиве не найден игровой runtime san_andreas_multiplayer.dll. "
+                        "Нужен полный CR:MP-клиент."
                     )
-                try:
-                    archive.unlink(missing_ok=True)
-                except OSError:
-                    pass
+                archive.unlink(missing_ok=True)
                 self._write_install_path(root)
                 with self._lock:
                     self._game_root = root
                     self._install_path = root
                     self._progress = 100.0
                     self._progress_label = "ГОТОВО"
-                    self._status = f"Клиент проверен через резервный ZIP ({count} файлов)."
+                    self._status = (
+                        f"Первичная установка завершена ({count} файлов). "
+                        "Последующие проверки смогут скачивать только изменённые файлы."
+                    )
                     self._phase = "ready"
                     self._error = ""
-                write_launcher_log(f"Client ZIP fallback completed: root={root}; files={count}")
+                    self._speed_bps = 0.0
+                write_launcher_log(
+                    f"Client ZIP install completed: root={root}; files={count}; "
+                    f"release={release.get('version', 'unknown')}"
+                )
                 return
 
-            install_name = str(manifest.get("install_root", "GTA Criminal Russia"))
-            if (selected / "gta_sa.exe").is_file() or selected.name.casefold() == install_name.casefold():
-                destination = selected.parent
-            else:
-                destination = selected
             with self._lock:
-                self._status = "Скачиваю и проверяю игровые файлы…"
+                self._status = "Найден установленный клиент. Сверяю манифест и докачиваю только изменения…"
                 self._phase = "download"
             _install_root, count = download_client_folder(
                 destination,
@@ -663,7 +720,7 @@ class LauncherApi:
             runtime = find_injected_multiplayer_dll(root)
             if not (root / "gta_sa.exe").is_file() or not runtime:
                 raise RuntimeError(
-                    "Не найден игровой runtime grand_theft_auto_san_andreas.dll. "
+                    "Не найден игровой runtime san_andreas_multiplayer.dll. "
                     "Манифест может описывать не полный клиент."
                 )
             apply_successful_update(root, manifest)
@@ -673,10 +730,17 @@ class LauncherApi:
                 self._install_path = root
                 self._progress = 100.0
                 self._progress_label = "ГОТОВО"
-                self._status = f"Клиент {manifest.get('version', release.get('version', 'unknown'))} проверен."
+                self._status = (
+                    f"Клиент {manifest.get('version', release.get('version', 'unknown'))} проверен. "
+                    "Скачаны только отличающиеся файлы."
+                )
                 self._phase = "ready"
                 self._error = ""
-            write_launcher_log(f"Client update completed: root={root}; files={count}")
+                self._speed_bps = 0.0
+            write_launcher_log(
+                f"Client delta update completed: root={root}; files={count}; "
+                f"fingerprint={manifest.get('fingerprint', '')}"
+            )
         except Exception as exc:
             write_launcher_log(f"ERROR updating client: {traceback.format_exc()}")
             with self._lock:

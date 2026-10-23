@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import ipaddress
 import json
@@ -40,6 +41,9 @@ CLIENT_MANIFEST_URL = "https://raw.githubusercontent.com/LEDERG777-TEXNARIC/lede
 ZIP_URL = "https://drive.usercontent.google.com/download?id=1981J9qVnGbEjLK7lXg7L2AO1br0ATRct&export=download&confirm=t"
 CLIENT_FILES_MANIFEST_URL = "https://oddly-hopeful-rudd.cloudpub.ru/client-manifest.json"
 ZIP_SIZE = 4_006_928_307
+PARALLEL_DOWNLOAD_WORKERS = 8
+PARALLEL_DOWNLOAD_MIN_SIZE = 32 * 1024 * 1024
+DEFAULT_CLIENT_EXPANDED_SIZE = 6 * 1024 * 1024 * 1024
 SERVER_HOST = "188.127.241.8"
 SERVER_PORT = 1130
 DEFAULT_LAUNCH_MODE = "direct"
@@ -628,6 +632,300 @@ def _content_range_total(value: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
+
+class ParallelRangeUnsupported(RuntimeError):
+    """The server did not honor byte-range requests; sequential download is safe."""
+
+
+def should_use_manifest_update(destination: Path, preferred_executable: str | None = None) -> bool:
+    """Use per-file updates only when a recognizable CR:MP install already exists."""
+    client = find_client(destination, preferred_executable or DEFAULT_CLIENT_EXECUTABLE)
+    if client is None:
+        return False
+    root = game_root_for(client)
+    return (root / "gta_sa.exe").is_file() and bool(find_injected_multiplayer_dll(root))
+
+
+def ensure_install_space(
+    destination: Path,
+    archive_size: int,
+    install_size: int = 0,
+    reserve_bytes: int = 256 * 1024 * 1024,
+) -> int:
+    """Fail before downloading if the ZIP plus expanded client will not fit."""
+    destination.mkdir(parents=True, exist_ok=True)
+    compressed = max(0, int(archive_size or ZIP_SIZE))
+    expanded = max(compressed, int(install_size or DEFAULT_CLIENT_EXPANDED_SIZE))
+    required = compressed + expanded + max(0, int(reserve_bytes))
+    free = shutil.disk_usage(destination).free
+    if free < required:
+        raise RuntimeError(
+            "Недостаточно места для установки LEDERG CR:MP.\\n\\n"
+            f"Нужно примерно {required / (1024 ** 3):.1f} ГБ "
+            f"(архив + файлы игры + резерв), доступно {free / (1024 ** 3):.1f} ГБ."
+        )
+    return required
+
+
+def download_archive_parallel(
+    destination: Path,
+    url: str,
+    *,
+    total_size: int,
+    expected_sha256: str = "",
+    etag: str | None = None,
+    progress=None,
+    cancel=None,
+    workers: int = PARALLEL_DOWNLOAD_WORKERS,
+    http=None,
+) -> Path:
+    """Download a large ZIP using resumable parallel HTTP Range requests."""
+    client_http = http or HTTP
+    if total_size <= 0:
+        raise ValueError("Размер ZIP для параллельной загрузки должен быть известен.")
+
+    destination.mkdir(parents=True, exist_ok=True)
+    complete = destination / ".lederg-crmp-download.zip"
+    partial = destination / ".lederg-crmp-download.zip.part"
+    metadata_path = destination / ".lederg-crmp-download.zip.parallel.json"
+    count = max(1, min(int(workers), total_size))
+    chunk_paths = [
+        destination / f".lederg-crmp-download.zip.part.{index:02d}"
+        for index in range(count)
+    ]
+    digest_expected = str(expected_sha256 or "").lower().strip()
+
+    def archive_matches(candidate: Path) -> bool:
+        if not candidate.is_file() or candidate.stat().st_size != total_size:
+            return False
+        if not zipfile.is_zipfile(candidate):
+            return False
+        if digest_expected:
+            digest = hashlib.sha256()
+            with candidate.open("rb") as stream:
+                for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest().lower() != digest_expected:
+                return False
+        return True
+
+    if archive_matches(complete):
+        return complete
+    complete.unlink(missing_ok=True)
+
+    meta = {
+        "url": url,
+        "total_size": int(total_size),
+        "etag": str(etag or ""),
+        "workers": count,
+    }
+    previous_meta = None
+    try:
+        previous_meta = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        pass
+    if previous_meta != meta:
+        for chunk_path in chunk_paths:
+            chunk_path.unlink(missing_ok=True)
+        metadata_path.write_text(json.dumps(meta, sort_keys=True), encoding="utf-8")
+
+    chunk_bounds = []
+    for index in range(count):
+        start = index * total_size // count
+        end = ((index + 1) * total_size // count) - 1
+        chunk_bounds.append((start, end))
+
+    # Probe the actual download endpoint before opening several large streams.
+    # A stale proxy or HTML virus-scan page must not be appended to a ZIP.
+    try:
+        with client_http.get(
+            url,
+            headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
+            stream=True,
+            allow_redirects=True,
+            timeout=(20, 30),
+        ) as probe:
+            if probe.status_code != 206:
+                raise ParallelRangeUnsupported("Источник не поддерживает HTTP Range.")
+            match = re.fullmatch(
+                r"bytes\s+0-0/(\d+)", probe.headers.get("Content-Range", ""), re.I
+            )
+            if not match or int(match.group(1)) != total_size:
+                raise ParallelRangeUnsupported("Источник некорректно обрабатывает HTTP Range.")
+            if "text/html" in (probe.headers.get("Content-Type") or "").lower():
+                raise ParallelRangeUnsupported("Источник вернул HTML вместо ZIP.")
+            first = next(probe.iter_content(chunk_size=1), b"")
+            if first != b"P":
+                raise RuntimeError("Ответ Range не похож на начало ZIP-архива.")
+    except ParallelRangeUnsupported:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Не удалось проверить параллельную загрузку: {exc}") from exc
+
+    abort = threading.Event()
+    unsupported = threading.Event()
+    progress_lock = threading.Lock()
+    first_error: list[Exception] = []
+
+    def update_progress(index: int) -> None:
+        if progress is None:
+            return
+        with progress_lock:
+            done = sum(p.stat().st_size for p in chunk_paths if p.is_file())
+        progress("download", min(done, total_size), total_size, f"GTA Criminal Russia.zip · канал {index + 1}/{count}")
+
+    def fetch_chunk(index: int) -> None:
+        start, end = chunk_bounds[index]
+        chunk_path = chunk_paths[index]
+        chunk_size = end - start + 1
+        if chunk_path.is_file() and chunk_path.stat().st_size > chunk_size:
+            chunk_path.unlink()
+        if chunk_path.is_file() and chunk_path.stat().st_size == chunk_size:
+            update_progress(index)
+            return
+
+        last_error = None
+        for attempt in range(4):
+            if cancel is not None and cancel.is_set():
+                raise InterruptedError("Загрузка остановлена. Частичные диапазоны сохранены.")
+            if abort.is_set():
+                raise InterruptedError("Загрузка остановлена из-за ошибки соседнего потока.")
+            if unsupported.is_set():
+                raise ParallelRangeUnsupported("Сервер не поддержал параллельные диапазоны.")
+
+            offset = chunk_path.stat().st_size if chunk_path.is_file() else 0
+            if offset > chunk_size:
+                chunk_path.unlink(missing_ok=True)
+                offset = 0
+            range_start = start + offset
+            headers = {
+                "Range": f"bytes={range_start}-{end}",
+                "Accept-Encoding": "identity",
+            }
+            if etag and offset:
+                headers["If-Range"] = etag
+
+            try:
+                with client_http.get(
+                    url,
+                    headers=headers,
+                    stream=True,
+                    allow_redirects=True,
+                    timeout=(20, 90),
+                ) as response:
+                    if response.status_code == 200:
+                        unsupported.set()
+                        raise ParallelRangeUnsupported("Сервер проигнорировал HTTP Range.")
+                    if response.status_code != 206:
+                        response.raise_for_status()
+                        raise RuntimeError(f"Неожиданный HTTP {response.status_code} для диапазона.")
+                    match = re.fullmatch(
+                        r"bytes\s+(\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""), re.I
+                    )
+                    if (
+                        not match
+                        or int(match.group(1)) != range_start
+                        or int(match.group(2)) != end
+                        or int(match.group(3)) != total_size
+                    ):
+                        raise RuntimeError("Источник вернул некорректный Content-Range.")
+                    content_type = (response.headers.get("Content-Type") or "").lower()
+                    if "text/html" in content_type:
+                        raise RuntimeError("Источник вернул HTML вместо ZIP.")
+                    received = offset
+                    first_chunk = offset == 0 and index == 0
+                    with chunk_path.open("ab" if offset else "wb") as output:
+                        for block in response.iter_content(chunk_size=1024 * 1024):
+                            if cancel is not None and cancel.is_set():
+                                output.flush()
+                                raise InterruptedError("Загрузка остановлена. Частичные диапазоны сохранены.")
+                            if abort.is_set() or unsupported.is_set():
+                                raise InterruptedError("Параллельная загрузка остановлена.")
+                            if not block:
+                                continue
+                            if first_chunk:
+                                first_chunk = False
+                                if not block.startswith(b"PK"):
+                                    raise RuntimeError("Первый диапазон не содержит сигнатуру ZIP.")
+                            output.write(block)
+                            received += len(block)
+                            update_progress(index)
+
+                if received != chunk_size or chunk_path.stat().st_size != chunk_size:
+                    raise ConnectionError(
+                        f"Диапазон {index + 1}/{count} загружен не полностью "
+                        f"({chunk_path.stat().st_size}/{chunk_size} байт)."
+                    )
+                update_progress(index)
+                return
+            except (ParallelRangeUnsupported, InterruptedError):
+                raise
+            except Exception as exc:
+                last_error = exc
+                if attempt < 3:
+                    time.sleep(0.4 * (attempt + 1))
+        raise RuntimeError(f"Не удалось загрузить диапазон {index + 1}/{count}: {last_error}") from last_error
+
+    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="LEDERG-range") as pool:
+        futures = [pool.submit(fetch_chunk, index) for index in range(count)]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except ParallelRangeUnsupported as exc:
+                unsupported.set()
+                abort.set()
+                if not first_error:
+                    first_error.append(exc)
+                for item in futures:
+                    item.cancel()
+            except InterruptedError as exc:
+                if not first_error:
+                    first_error.append(exc)
+                abort.set()
+                for item in futures:
+                    item.cancel()
+            except Exception as exc:
+                if not first_error:
+                    first_error.append(exc)
+                abort.set()
+                for item in futures:
+                    item.cancel()
+
+    if unsupported.is_set():
+        raise ParallelRangeUnsupported(str(first_error[0]) if first_error else "HTTP Range недоступен.")
+    if first_error:
+        raise RuntimeError(f"Параллельная загрузка не завершена: {first_error[0]}") from first_error[0]
+    if cancel is not None and cancel.is_set():
+        raise InterruptedError("Загрузка остановлена. Частичные диапазоны сохранены.")
+
+    with partial.open("wb") as output:
+        for index, chunk_path in enumerate(chunk_paths):
+            start, end = chunk_bounds[index]
+            if not chunk_path.is_file() or chunk_path.stat().st_size != end - start + 1:
+                raise RuntimeError(f"Не найден полный диапазон {index + 1}/{count}.")
+            with chunk_path.open("rb") as chunk:
+                shutil.copyfileobj(chunk, output, length=8 * 1024 * 1024)
+
+    if partial.stat().st_size != total_size or not archive_matches(partial):
+        partial.unlink(missing_ok=True)
+        # Keep range parts for a diagnosable/retryable failure only if the server
+        # did not produce the expected complete byte count. Bad full archives are
+        # discarded so retrying will not repeatedly assemble corrupt bytes.
+        for chunk_path in chunk_paths:
+            chunk_path.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        raise RuntimeError("ZIP не прошёл проверку размера, структуры или SHA-256.")
+
+    partial.replace(complete)
+    for chunk_path in chunk_paths:
+        chunk_path.unlink(missing_ok=True)
+    metadata_path.unlink(missing_ok=True)
+    if progress:
+        progress("download", total_size, total_size, "ZIP скачан параллельными каналами и проверен")
+    return complete
+
+
+
 def download_archive(destination: Path, progress=None, cancel=None, url: str = ZIP_URL,
                      expected_sha256: str = "", expected_size: int = 0) -> Path:
     """
@@ -703,6 +1001,26 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
             "На выбранном диске недостаточно свободного места для архива.\n\n"
             f"Нужно примерно {need_gb:.1f} ГБ, доступно {free_gb:.1f} ГБ."
         )
+
+    if (
+        remote_size >= PARALLEL_DOWNLOAD_MIN_SIZE
+        and "bytes" in (head.headers.get("Accept-Ranges") or "").lower()
+    ):
+        try:
+            return download_archive_parallel(
+                destination,
+                url,
+                total_size=remote_size,
+                expected_sha256=expected_sha256,
+                etag=etag,
+                progress=progress,
+                cancel=cancel,
+            )
+        except ParallelRangeUnsupported as exc:
+            write_launcher_log(f"HTTP Range unavailable; switching to resumable single-stream download: {exc}")
+            for path in destination.glob(".lederg-crmp-download.zip.part.*"):
+                path.unlink(missing_ok=True)
+            (destination / ".lederg-crmp-download.zip.parallel.json").unlink(missing_ok=True)
 
     last_error: Exception | None = None
     for attempt in range(4):
@@ -865,6 +1183,7 @@ def _file_crc32(path: Path) -> int:
     return checksum & 0xFFFFFFFF
 
 
+
 def download_client_folder(
     destination: Path,
     manifest_url: str,
@@ -872,13 +1191,9 @@ def download_client_folder(
     cancel=None,
     http=None,
     manifest_payload: dict | None = None,
+    workers: int = PARALLEL_DOWNLOAD_WORKERS,
 ) -> tuple[Path, int]:
-    """
-    Download a client as individual files into its install folder.
-
-    A manifest supplies safe relative paths, expected sizes, and CRC32 values.
-    Each file uses its own temporary .part file and can resume with HTTP Range.
-    """
+    """Install/update files from a validated manifest using bounded parallel workers."""
     client_http = http or HTTP
     try:
         payload = (
@@ -891,15 +1206,14 @@ def download_client_folder(
     except Exception as exc:
         raise RuntimeError(f"Не удалось получить манифест файлов клиента: {exc}") from exc
 
-    install_root_name = payload["install_root"]
-    root_rel = PurePosixPath(install_root_name)
+    root_rel = PurePosixPath(payload["install_root"])
     base_url = payload["files_base_url"]
     files = [
-        (PurePosixPath(item["path"]), item["size"], int(item["crc32"], 16))
+        (PurePosixPath(item["path"]), int(item["size"]), int(item["crc32"], 16))
         for item in payload["files"]
     ]
-    total_bytes = payload["total_bytes"]
-    if total_bytes <= 0:
+    total_bytes = int(payload["total_bytes"])
+    if total_bytes <= 0 or not files:
         raise ValueError("Манифест клиента не содержит файлов для загрузки.")
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -911,38 +1225,48 @@ def download_client_folder(
         raise ValueError("Папка установки выходит за пределы выбранного места.") from exc
     install_root.mkdir(parents=True, exist_ok=True)
 
-    completed_bytes = 0
-    for relative, expected_size, expected_crc in files:
+    progress_lock = threading.Lock()
+    stop_event = threading.Event()
+    file_progress = {relative.as_posix(): 0 for relative, _, _ in files}
+
+    def report_progress(name: str, value: int) -> None:
+        value = max(0, int(value))
+        with progress_lock:
+            file_progress[name] = value
+            total_done = min(total_bytes, sum(file_progress.values()))
+        if progress:
+            progress("download", total_done, total_bytes, name)
+
+    def download_one(item: tuple[PurePosixPath, int, int]) -> None:
+        relative, expected_size, expected_crc = item
+        rel_name = relative.as_posix()
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Загрузка остановлена. Уже скачанные файлы сохранены.")
+        if stop_event.is_set():
+            raise InterruptedError("Загрузка остановлена из-за ошибки другого файла.")
 
         target = install_root.joinpath(*relative.parts)
         try:
-            # Resolve before creating parent directories so symlinks inside the
-            # install tree cannot cause writes outside the selected directory.
             resolved_target = target.resolve()
             resolved_target.relative_to(install_root)
         except ValueError as exc:
-            raise ValueError(f"Файл выходит за пределы папки установки: {relative.as_posix()}") from exc
+            raise ValueError(f"Файл выходит за пределы папки установки: {rel_name}") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if target.is_file() and target.stat().st_size == expected_size:
             if _file_crc32(target) == expected_crc:
-                completed_bytes += expected_size
-                if progress:
-                    progress("download", completed_bytes, total_bytes, relative.as_posix())
-                continue
+                report_progress(rel_name, expected_size)
+                return
 
         part = target.with_name(target.name + ".lederg.part")
         if part.is_file() and part.stat().st_size == expected_size:
             if _file_crc32(part) == expected_crc:
                 part.replace(target)
-                completed_bytes += expected_size
-                if progress:
-                    progress("download", completed_bytes, total_bytes, relative.as_posix())
-                continue
+                report_progress(rel_name, expected_size)
+                return
         if part.is_file() and part.stat().st_size > expected_size:
             part.unlink()
+        report_progress(rel_name, part.stat().st_size if part.is_file() else 0)
 
         quoted_path = "/".join(quote(segment, safe="") for segment in relative.parts)
         file_url = base_url.rstrip("/") + "/" + quoted_path
@@ -951,87 +1275,118 @@ def download_client_folder(
         for attempt in range(4):
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Загрузка остановлена. Частичный файл сохранён для продолжения.")
+            if stop_event.is_set():
+                raise InterruptedError("Загрузка остановлена из-за ошибки другого файла.")
 
             offset = part.stat().st_size if part.is_file() else 0
             if offset > expected_size:
                 part.unlink(missing_ok=True)
                 offset = 0
-            headers = {"Range": f"bytes={offset}-"} if offset else {}
+            headers = {"Range": f"bytes={offset}-", "Accept-Encoding": "identity"} if offset else {}
             checksum = _file_crc32(part) if offset else 0
 
             try:
                 with client_http.get(
-                    file_url, headers=headers, stream=True, timeout=(20, 60)
-                ) as file_response:
-                    if offset and file_response.status_code == 206:
+                    file_url, headers=headers, stream=True, timeout=(20, 90)
+                ) as response:
+                    if offset and response.status_code == 206:
                         match = re.fullmatch(
-                            r"bytes\s+(\d+)-(\d+)/(\d+)", 
-                            file_response.headers.get("Content-Range", ""), re.I
+                            r"bytes\s+(\d+)-(\d+)/(\d+)",
+                            response.headers.get("Content-Range", ""), re.I
                         )
-                        if not match or int(match.group(1)) != offset or int(match.group(3)) != expected_size:
-                            raise RuntimeError(f"Сервер вернул некорректный Range для {relative.as_posix()}")
+                        if (
+                            not match
+                            or int(match.group(1)) != offset
+                            or int(match.group(3)) != expected_size
+                        ):
+                            raise RuntimeError(f"Некорректный Range для {rel_name}")
                         write_mode = "ab"
                     else:
-                        if file_response.status_code not in (200, 206):
-                            file_response.raise_for_status()
-                        if file_response.status_code == 206:
+                        if response.status_code not in (200, 206):
+                            response.raise_for_status()
+                        if response.status_code == 206:
                             match = re.fullmatch(
                                 r"bytes\s+(\d+)-(\d+)/(\d+)",
-                                file_response.headers.get("Content-Range", ""), re.I
+                                response.headers.get("Content-Range", ""), re.I
                             )
-                            if not match or int(match.group(1)) != 0 or int(match.group(3)) != expected_size:
-                                raise RuntimeError(f"Сервер вернул некорректный Range для {relative.as_posix()}")
+                            if (
+                                not match
+                                or int(match.group(1)) != 0
+                                or int(match.group(3)) != expected_size
+                            ):
+                                raise RuntimeError(f"Некорректный Range для {rel_name}")
                         offset = 0
                         checksum = 0
                         write_mode = "wb"
 
+                    content_type = (response.headers.get("Content-Type") or "").lower()
+                    if "text/html" in content_type:
+                        raise RuntimeError(f"Сервер вернул HTML вместо файла {rel_name}")
                     received = offset
                     with part.open(write_mode) as output:
-                        for chunk in file_response.iter_content(chunk_size=1024 * 1024):
+                        for block in response.iter_content(chunk_size=1024 * 1024):
                             if cancel is not None and cancel.is_set():
+                                output.flush()
                                 raise InterruptedError(
                                     "Загрузка остановлена. Частичный файл сохранён для продолжения."
                                 )
-                            if not chunk:
+                            if stop_event.is_set():
+                                output.flush()
+                                raise InterruptedError("Загрузка остановлена из-за ошибки другого файла.")
+                            if not block:
                                 continue
-                            output.write(chunk)
-                            checksum = zlib.crc32(chunk, checksum)
-                            received += len(chunk)
-                            if progress:
-                                progress(
-                                    "download", completed_bytes + received,
-                                    total_bytes, relative.as_posix()
-                                )
+                            output.write(block)
+                            checksum = zlib.crc32(block, checksum)
+                            received += len(block)
+                            report_progress(rel_name, received)
 
                 if received != expected_size or part.stat().st_size != expected_size:
                     raise ConnectionError(
-                        f"Файл {relative.as_posix()} скачан не полностью "
+                        f"Файл {rel_name} скачан не полностью "
                         f"({part.stat().st_size}/{expected_size} байт)."
                     )
                 if (checksum & 0xFFFFFFFF) != expected_crc:
                     part.unlink(missing_ok=True)
-                    raise RuntimeError(f"Контрольная сумма не совпала: {relative.as_posix()}")
+                    report_progress(rel_name, 0)
+                    raise RuntimeError(f"Контрольная сумма не совпала: {rel_name}")
                 part.replace(target)
-                completed_bytes += expected_size
-                if progress:
-                    progress("download", completed_bytes, total_bytes, relative.as_posix())
+                report_progress(rel_name, expected_size)
                 last_error = None
-                break
+                return
             except InterruptedError:
                 raise
             except Exception as exc:
                 last_error = exc
                 if part.is_file() and part.stat().st_size >= expected_size:
                     part.unlink(missing_ok=True)
+                    report_progress(rel_name, 0)
                 if attempt < 3:
-                    time.sleep(min(attempt + 1, 2))
+                    time.sleep(min(0.4 * (attempt + 1), 1.5))
 
-        if last_error is not None:
-            raise RuntimeError(
-                f"Не удалось скачать файл клиента {relative.as_posix()} после 4 попыток: {last_error}"
-            ) from last_error
+        raise RuntimeError(
+            f"Не удалось скачать файл клиента {rel_name} после 4 попыток: {last_error}"
+        ) from last_error
 
+    thread_count = max(1, min(int(workers), len(files)))
+    first_error: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=thread_count, thread_name_prefix="LEDERG-file") as pool:
+        futures = [pool.submit(download_one, item) for item in files]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:
+                if not first_error:
+                    first_error.append(exc)
+                    stop_event.set()
+                    for other in futures:
+                        other.cancel()
+    if first_error:
+        error = first_error[0]
+        if isinstance(error, (ValueError, InterruptedError)):
+            raise error
+        raise RuntimeError(f"Обновление файлов прервано: {error}") from error
     return install_root, len(files)
+
 
 def rounded_polygon(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
                     radius: float, **kwargs):
@@ -1518,7 +1873,10 @@ class LedgerLauncher(tk.Tk):
             count = 0
             archive = None
             installed_manifest = None
-            if release.get("files_manifest_url"):
+            use_manifest_update = bool(release.get("files_manifest_url")) and should_use_manifest_update(
+                destination, release.get("client_executable")
+            )
+            if use_manifest_update:
                 installed_manifest = fetch_files_manifest(release["files_manifest_url"], http=HTTP)
                 self.events.put((
                     "phase", "download", "СКАЧИВАЮ ОБНОВЛЁННЫЕ ФАЙЛЫ…",
@@ -1534,6 +1892,11 @@ class LedgerLauncher(tk.Tk):
                     manifest_payload=installed_manifest,
                 )
             else:
+                ensure_install_space(
+                    destination,
+                    int(release.get("archive_size", 0) or ZIP_SIZE),
+                    int(installed_manifest.get("total_bytes", 0) or 0) if installed_manifest else 0,
+                )
                 archive = download_archive(
                     destination,
                     progress=lambda phase, done, total, label: self.events.put(

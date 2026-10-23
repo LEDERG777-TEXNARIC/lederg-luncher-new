@@ -10,6 +10,14 @@ Native Windows launcher with a live HTML/CSS/JavaScript interface delivered from
 - UI edits in web/index.html and changes to the runtime modules are picked up on the next launch without downloading a new EXE. The direct-connect helper is embedded in the Windows EXE and starts gta_sa.exe with the multiplayer DLL and configured server endpoint.
 - Game files are updated independently through the existing client manifest, with per-file CRC validation and resumable downloads.
 
+## LEDERG COMMAND / accelerated client transfer
+
+- First-time install: download the compressed client ZIP using up to **8 parallel HTTP Range streams** when the origin supports byte ranges. Every part can resume after an interruption; the final archive is reassembled and checked as a ZIP, with SHA-256 verification when the release manifest provides a digest.
+- Existing install: compare the Cloudpub per-file manifest and fetch only missing or changed files, using up to **8 parallel workers**, per-file CRC32 checks and resumable `.lederg.part` files.
+- The launcher shows live throughput (MiB/s), percentage and estimated time remaining. It checks free space before downloading so the compressed archive and extracted game can coexist safely.
+- Runtime support for Range is probed before parallel download; if an origin ignores Range, the installer safely falls back to the resumable single-stream path.
+- The visual interface is the LEDERG COMMAND black/red HUD and includes an explicit transfer engine status.
+
 ## Development
 
 Use Python 3.14 x64 on Windows.

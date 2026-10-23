@@ -1,10 +1,16 @@
 import hashlib
 import io
 import re
+import requests
 import tempfile
 import threading
+import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 import zipfile
+
+import launcher
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -19,6 +25,10 @@ from launcher import (
     find_direct_game_client,
     find_injected_multiplayer_dll,
     download_archive,
+    download_archive_parallel,
+    download_client_folder,
+    ensure_install_space,
+    should_use_manifest_update,
     fetch_release_manifest,
     find_client,
     game_root_for,
@@ -83,6 +93,23 @@ class RangeTestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass
+
+
+class ParallelRangeTestHandler(RangeTestHandler):
+    active_requests = 0
+    max_active_requests = 0
+    activity_lock = threading.Lock()
+
+    def do_GET(self):
+        with self.activity_lock:
+            type(self).active_requests += 1
+            type(self).max_active_requests = max(type(self).max_active_requests, type(self).active_requests)
+        try:
+            time.sleep(0.12)
+            super().do_GET()
+        finally:
+            with self.activity_lock:
+                type(self).active_requests -= 1
 
 
 class LauncherTests(unittest.TestCase):
@@ -352,6 +379,141 @@ class LauncherTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+
+
+    def test_parallel_archive_download_reassembles_and_verifies_all_ranges(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("gta_sa.exe", b"MZ" * 4096)
+            bundle.writestr("multiplayer_c/multiplayer_browser_cr.exe", b"MZ" * 2048)
+        archive_bytes = buffer.getvalue()
+        RangeTestHandler.payload = archive_bytes
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RangeTestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                destination = Path(temp)
+                digest = hashlib.sha256(archive_bytes).hexdigest()
+                completed = download_archive_parallel(
+                    destination,
+                    f"http://127.0.0.1:{server.server_port}/client.zip",
+                    total_size=len(archive_bytes),
+                    expected_sha256=digest,
+                    workers=4,
+                )
+                self.assertTrue(zipfile.is_zipfile(completed))
+                self.assertEqual(completed.read_bytes(), archive_bytes)
+                self.assertEqual(completed.name, ".lederg-crmp-download.zip")
+                self.assertFalse(list(destination.glob(".lederg-crmp-download.zip.part.*")))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_download_archive_auto_uses_parallel_range_mode_for_large_supported_sources(self):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("gta_sa.exe", b"MZ" * 1024)
+        archive_bytes = buffer.getvalue()
+        RangeTestHandler.payload = archive_bytes
+        server = ThreadingHTTPServer(("127.0.0.1", 0), RangeTestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        original_threshold = launcher.PARALLEL_DOWNLOAD_MIN_SIZE
+        launcher.PARALLEL_DOWNLOAD_MIN_SIZE = 1
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                digest = hashlib.sha256(archive_bytes).hexdigest()
+                completed = download_archive(
+                    Path(temp),
+                    url=f"http://127.0.0.1:{server.server_port}/client.zip",
+                    expected_sha256=digest,
+                    expected_size=len(archive_bytes),
+                )
+                self.assertEqual(completed.read_bytes(), archive_bytes)
+                self.assertTrue(zipfile.is_zipfile(completed))
+        finally:
+            launcher.PARALLEL_DOWNLOAD_MIN_SIZE = original_threshold
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_install_space_preflight_reserves_archive_and_expanded_client(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with patch("launcher.shutil.disk_usage", return_value=SimpleNamespace(free=599)):
+                with self.assertRaises(RuntimeError):
+                    ensure_install_space(Path(temp), archive_size=100, install_size=300, reserve_bytes=200)
+            with patch("launcher.shutil.disk_usage", return_value=SimpleNamespace(free=600)):
+                self.assertEqual(
+                    ensure_install_space(Path(temp), archive_size=100, install_size=300, reserve_bytes=200),
+                    600,
+                )
+
+    def test_folder_download_uses_parallel_safe_manifest_files(self):
+        from launcher import zlib
+        payload_bytes = {
+            "gta_sa.exe": b"MZ-LEDERG-CLIENT",
+            "multiplayer_c/multiplayer_browser_cr.exe": b"MZ-CRMP-CLIENT",
+            "data/script.img": b"script-data",
+        }
+        ParallelRangeTestHandler.payload = next(iter(payload_bytes.values()))
+        ParallelRangeTestHandler.max_active_requests = 0
+        server = ThreadingHTTPServer(("127.0.0.1", 0), ParallelRangeTestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                destination = Path(temp)
+                # This test uses a single payload for every route; expected CRCs
+                # match it so we can prove the parallel install/update pipeline.
+                from launcher import zlib
+                blob = ParallelRangeTestHandler.payload
+                manifest_payload = {
+                    "schema": 1,
+                    "version": "test",
+                    "install_root": "GTA Criminal Russia",
+                    "files_base_url": f"http://127.0.0.1:{server.server_port}/files/",
+                    "files": [
+                        {"path": name, "size": len(blob), "crc32": f"{zlib.crc32(blob) & 0xffffffff:08x}"}
+                        for name in payload_bytes
+                    ],
+                }
+                class LocalRouteHTTP:
+                    def get(self, _url, **kwargs):
+                        return requests.get(
+                            f"http://127.0.0.1:{server.server_port}/files/client", **kwargs
+                        )
+
+                root, count = download_client_folder(
+                    destination,
+                    f"https://example.cloudpub.ru/client-manifest.json",
+                    manifest_payload=manifest_payload,
+                    http=LocalRouteHTTP(),
+                )
+                self.assertEqual(count, 3)
+                self.assertEqual((root / "gta_sa.exe").read_bytes(), blob)
+                self.assertEqual((root / "multiplayer_c" / "multiplayer_browser_cr.exe").read_bytes(), blob)
+                self.assertEqual((root / "data" / "script.img").read_bytes(), blob)
+                self.assertGreaterEqual(ParallelRangeTestHandler.max_active_requests, 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
+    def test_first_install_uses_archive_and_existing_install_uses_manifest_updates(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            self.assertFalse(should_use_manifest_update(base))
+
+            root = base / "GTA Criminal Russia"
+            multiplayer = root / "multiplayer_c"
+            multiplayer.mkdir(parents=True)
+            (root / "gta_sa.exe").write_bytes(b"MZ")
+            (multiplayer / "multiplayer_browser_cr.exe").write_bytes(b"MZ")
+            (multiplayer / "san_andreas_multiplayer.dll").write_bytes(b"MZ")
+            self.assertTrue(should_use_manifest_update(base))
 
     def test_direct_crmp_launch_uses_native_client_and_supported_arguments(self):
         from launcher import build_direct_game_command
