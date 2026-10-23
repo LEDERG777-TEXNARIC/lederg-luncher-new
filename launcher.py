@@ -333,11 +333,18 @@ def build_launch_command(
     nickname: str = "Player",
     launch_mode: str = DEFAULT_LAUNCH_MODE,
 ) -> list[str]:
-    """Build the client launch contract; the actual game client owns the UDP socket."""
+    """Build CR:MP bootstrap arguments without accidentally setting a server password.
+
+    The Criminal Russia bootstrap reads PlayerName from HKCU\\Software\\SAMP.
+    Unlike a generic SA-MP command helper, this bootstrap interprets trailing
+    command-line switches in a way that can leave an orphaned "-z -n" pair
+    when "-n nickname" is appended here. The client then treats "-n" as the
+    server password and rejects a passwordless server. Only pass host:port;
+    the caller registers the nickname in the registry before launching.
+    """
     if launch_mode in {"browser", "browser-ui"}:
         return [str(executable)]
-    nick = sanitize_nickname(nickname)
-    return [str(executable), f"{host}:{int(port)}", "-n", nick]
+    return [str(executable), f"{host}:{int(port)}"]
 
 
 
