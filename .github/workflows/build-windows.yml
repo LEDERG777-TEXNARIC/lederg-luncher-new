@@ -1,0 +1,48 @@
+name: Windows launcher
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep canonical source line endings
+        run: git config core.autocrlf false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          architecture: "x64"
+      - run: python -m pip install -r requirements.txt
+      - run: python tools/update_runtime_manifest.py
+      - run: git diff --exit-code -- runtime-manifest.json
+      - run: python -m unittest discover -v
+      - name: Build x86 direct-connect helper
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if (!(Test-Path $compiler)) { throw "The .NET Framework C# compiler is not installed." }
+          & $compiler /nologo /platform:x86 /target:exe /out:LEDERG-DirectLaunch.exe direct_launcher.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path "LEDERG-DirectLaunch.exe")) { throw "Direct-connect helper was not produced." }
+      - run: pyinstaller --clean --noconfirm "LEDERG CRMP.spec"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LEDERG-CRMP-Launcher-Windows-x64
+          path: dist/LEDERG CRMP.exe
+          if-no-files-found: error
+      - name: Publish launcher release
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v2.1.1-{0}', github.run_number) }}
+          target_commitish: ${{ github.sha }}
+          name: LEDERG CR:MP Launcher ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v2.1.1-{0}', github.run_number) }}
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: dist/LEDERG CRMP.exe

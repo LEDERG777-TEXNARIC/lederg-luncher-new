@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#050507">
+<title>LEDERG PROJECT — CR:MP</title>
+<style>
+:root{color-scheme:dark;--bg:#080808;--card:#101010;--line:#292929;--red:#f32641;--red2:#c8102e;--white:#f4f4f4;--muted:#858585;--green:#67e4a3;--amber:#ffc56e}
+*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:var(--bg);color:var(--white);font-family:"Segoe UI",Arial,sans-serif}body{min-width:320px;min-height:100vh}button,input{font:inherit}button{cursor:pointer}.app{max-width:1450px;margin:auto;padding:24px 30px 20px;position:relative;overflow:hidden}.app:before{content:"";position:absolute;inset:0 0 auto;height:520px;pointer-events:none;background:radial-gradient(ellipse at 79% 8%,rgba(243,38,65,.15),transparent 35%),linear-gradient(118deg,transparent 54%,rgba(255,255,255,.02) 54.2%,transparent 54.6%)}.content{position:relative;z-index:1;max-width:1280px;margin:auto}.topbar{display:flex;align-items:center;justify-content:space-between;gap:15px;border-bottom:1px solid var(--line);padding-bottom:19px}.brand{display:flex;align-items:center;gap:12px}.logo{width:43px;height:43px;border:1px solid var(--red);border-radius:13px;background:linear-gradient(145deg,#25080d,#0c0c0c);display:grid;place-items:center;font-size:20px;font-weight:1000;letter-spacing:-2px;box-shadow:inset 0 0 18px #f3264119}.brand-name{font-size:14px;letter-spacing:2px;font-weight:950}.brand-name em{font-style:normal;color:var(--red)}.brand-sub{margin-top:4px;font-size:8px;letter-spacing:2px;color:#777;font-weight:800}.top-actions{display:flex;align-items:center;gap:10px}.status-pill{border:1px solid #303030;border-radius:99px;background:#111;padding:10px 13px;display:flex;align-items:center;gap:8px;font-size:9px;letter-spacing:1.1px;color:#c8c8c8;font-weight:850}.pulse{width:6px;height:6px;border-radius:50%;background:var(--amber)}.pulse.good{background:var(--green);box-shadow:0 0 10px #67e4a366}.icon-btn{width:38px;height:38px;border-radius:10px;border:1px solid #333;background:#111;color:#aaa}.icon-btn:hover{border-color:var(--red);color:white}.layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:26px;padding-top:24px}.sidebar{border-right:1px solid var(--line);padding-right:18px}.side-title{font-size:8px;letter-spacing:2px;color:#666;font-weight:900;margin:13px 0}.nav-item{width:100%;display:flex;align-items:center;gap:11px;text-align:left;border:1px solid transparent;border-radius:10px;background:transparent;color:#8c8c8c;padding:12px;margin:4px 0;font-size:11px;font-weight:750}.nav-ico{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;background:#191919;color:#888}.nav-item.active{border-color:#f326413d;background:linear-gradient(90deg,#f326411c,#f3264105);color:white}.nav-item.active .nav-ico{background:var(--red);color:white}.sidebar-foot{border-top:1px solid var(--line);margin-top:90px;padding:16px 10px;font-size:8px;letter-spacing:1.5px;color:#666;line-height:2}.sidebar-foot strong{display:block;color:#aaa;font-size:9px}.main{min-width:0}.hero{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(280px,.85fr);gap:20px;align-items:stretch}.hero-copy{padding:26px 0 14px}.eyebrow{display:flex;align-items:center;gap:9px;font-size:9px;letter-spacing:2.5px;color:var(--red);font-weight:950}.eyebrow:before{content:"";width:23px;height:2px;background:var(--red)}h1{font-size:clamp(35px,5vw,63px);font-weight:1000;line-height:.96;letter-spacing:-2.8px;margin:22px 0 15px}h1 span{color:var(--red)}.lead{max-width:470px;font-size:12px;line-height:1.85;color:#999;margin:0}.lead strong{color:#eee}.tags{display:flex;gap:8px;flex-wrap:wrap;margin-top:24px}.tag{padding:7px 9px;border-radius:5px;border:1px solid #292929;background:#101010;color:#878787;font-size:8px;letter-spacing:1px;font-weight:850}.tag b{color:#eee}.server-card{position:relative;overflow:hidden;min-height:235px;border:1px solid #332126;border-radius:16px;background:linear-gradient(140deg,#170f11,#0d0d0e 56%,#101010);padding:21px;align-self:stretch}.server-card:before{content:"L";position:absolute;right:-3px;top:-65px;font-size:300px;line-height:1;font-weight:1000;color:#f3264109;pointer-events:none}.card-top{position:relative;display:flex;justify-content:space-between;align-items:center;gap:10px}.card-label{font-size:8px;letter-spacing:2px;color:#777;font-weight:900}.ready-badge{border:1px solid #274c3a;border-radius:4px;background:#15301f55;padding:6px 7px;color:var(--green);font-size:8px;letter-spacing:.8px;font-weight:900}.server-name{position:relative;margin:29px 0 7px;font-size:23px;letter-spacing:-.8px;font-weight:950}.server-name span{color:var(--red)}.server-sub{position:relative;font-size:8px;color:#777;letter-spacing:1.5px}.endpoint{position:relative;margin-top:24px;border:1px solid #2a2a2a;border-radius:9px;background:#090909;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:10px}.endpoint small{display:block;font-size:7px;letter-spacing:1.5px;color:#666;margin-bottom:5px;font-weight:900}.endpoint strong{font:12px Consolas,monospace}.copy-btn,.sub-btn{border:1px solid #333;border-radius:7px;background:#171717;color:#aaa;padding:8px 10px;font-size:8px;font-weight:900}.copy-btn:hover,.sub-btn:hover{border-color:var(--red);color:white}.section-head{display:flex;justify-content:space-between;align-items:end;gap:14px;margin:29px 0 13px}.section-title{font-size:12px;letter-spacing:1.5px;font-weight:950}.section-desc{margin-top:5px;font-size:8px;letter-spacing:.6px;color:#707070}.section-number{font-size:9px;color:#666;letter-spacing:1.5px;font-weight:900}.play-grid{display:grid;grid-template-columns:1.03fr .97fr;gap:14px}.panel{border:1px solid #292929;border-radius:13px;background:linear-gradient(145deg,#111,#0b0b0b);padding:19px}.panel-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:19px}.panel-head h2{font-size:10px;letter-spacing:1.4px;margin:0;font-weight:950}.panel-index{font:9px Consolas,monospace;color:#666}.field-label{display:flex;align-items:center;justify-content:space-between;gap:10px;color:#777;font-size:8px;letter-spacing:1px;font-weight:850;margin-bottom:8px}.field{width:100%;height:43px;outline:0;border:1px solid #303030;border-radius:8px;background:#080808;color:#eee;padding:0 12px;font-weight:700;font-size:12px}.field:focus{border-color:var(--red);box-shadow:0 0 0 3px #f3264114}.play-btn{width:100%;height:52px;margin-top:17px;display:flex;justify-content:space-between;align-items:center;padding:0 17px;border:0;border-radius:9px;background:linear-gradient(105deg,var(--red),var(--red2));color:white;letter-spacing:1.2px;font-size:11px;font-weight:1000;box-shadow:0 9px 24px #f3264124;transition:filter .15s,transform .15s}.play-btn:hover{filter:brightness(1.12);transform:translateY(-1px)}.play-btn:disabled{opacity:.48;cursor:wait;transform:none}.arrow{font-size:19px;font-weight:400}.play-note{display:flex;align-items:center;gap:7px;margin-top:12px;font-size:8px;color:#606060}.mini-dot{height:4px;width:4px;border-radius:50%;background:var(--red)}.install-row{display:flex;align-items:center;gap:10px;padding:11px;border:1px solid #292929;background:#0b0b0b;border-radius:9px;margin-bottom:10px}.install-icon{width:34px;height:34px;flex:0 0 34px;display:grid;place-items:center;border:1px solid #42212a;border-radius:8px;color:var(--red);background:#190d10;font-size:15px}.install-copy{min-width:0;flex:1}.install-copy strong{display:block;font-size:10px;margin-bottom:5px;letter-spacing:.3px}.install-copy span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#777;font-size:8px}.choose-btn{flex:0 0 auto;border:1px solid #333;border-radius:6px;background:#161616;color:#aaa;padding:8px;font-size:8px;font-weight:900}.choose-btn:hover{border-color:var(--red);color:#fff}.sub-btn{width:100%;height:39px}.progress-track{height:5px;border-radius:99px;background:#252525;overflow:hidden;margin-top:18px}.progress-fill{height:100%;width:0;border-radius:99px;background:linear-gradient(90deg,var(--red),#ff7788);transition:width .3s}.progress-info{display:flex;justify-content:space-between;gap:12px;margin-top:8px;font-size:8px;color:#686868}.progress-info strong{font:9px Consolas,monospace;color:#ccc}.status-line{display:flex;align-items:center;gap:8px;min-height:17px;margin-top:13px;font-size:9px;color:#aaa}.status-light{height:6px;width:6px;flex:0 0 6px;border-radius:50%;background:var(--amber)}.status-light.good{background:var(--green);box-shadow:0 0 9px #67e4a355}.status-light.bad{background:var(--red);box-shadow:0 0 9px #f3264166}.bottom-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-top:13px}.info-tile{border:1px solid #242424;border-radius:10px;background:#0d0d0d;padding:13px}.info-kicker{font-size:7px;color:#666;letter-spacing:1.4px;font-weight:900}.info-value{margin-top:9px;font-size:9px;font-weight:900;letter-spacing:.4px}.info-value.good{color:var(--green)}.info-value.red{color:var(--red)}.toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,18px);opacity:0;pointer-events:none;max-width:90vw;padding:12px 16px;border:1px solid #383838;border-radius:9px;background:#181818;box-shadow:0 12px 32px #000a;color:#fff;font-size:10px;transition:all .2s;z-index:10}.toast.show{opacity:1;transform:translate(-50%,0)}.footer{display:flex;justify-content:space-between;gap:12px;border-top:1px solid #202020;padding-top:16px;margin-top:23px;color:#575757;font-size:7px;letter-spacing:1.5px;font-weight:850}.hidden{display:none!important}
+@media(max-width:960px){.app{padding:18px}.layout{grid-template-columns:1fr;gap:10px}.sidebar{display:none}.hero{grid-template-columns:1fr}.hero-copy{padding:12px 0}.play-grid{grid-template-columns:1fr}.server-card{min-height:220px}}
+@media(max-width:540px){.app{padding:12px}.brand-name{font-size:11px}.brand-sub{font-size:7px;letter-spacing:1px}.status-pill{font-size:7px;padding:9px}.icon-btn{display:none}h1{letter-spacing:-1.5px}.bottom-grid{grid-template-columns:1fr}.endpoint strong{font-size:10px}.panel{padding:14px}.footer{font-size:6px}}
+
+/* LEDERG v2.1 — deeper black surfaces, sharper red accents, restrained motion */
+:root{color-scheme:dark;--bg:#050507;--card:#0b0b0e;--line:#25252b;--red:#ff203d;--red2:#a90d27;--white:#f5f5f7;--muted:#85858f;--green:#77e8ad;--amber:#ffc56e}
+html{scroll-behavior:smooth;background:#050507}
+body{background:radial-gradient(ellipse at 78% -5%,rgba(255,32,61,.13),transparent 34%),radial-gradient(ellipse at 2% 44%,rgba(255,32,61,.045),transparent 28%),#050507}
+body:after{content:"";position:fixed;inset:0;pointer-events:none;z-index:20;opacity:.08;background:repeating-linear-gradient(0deg,transparent 0,transparent 3px,rgba(255,255,255,.12) 4px)}
+.app{max-width:1540px;padding:27px 34px 23px}
+.app:before{height:590px;background:radial-gradient(ellipse at 80% 9%,rgba(255,32,61,.16),transparent 37%),linear-gradient(118deg,transparent 54%,rgba(255,255,255,.025) 54.2%,transparent 54.6%)}
+.topbar{padding-bottom:22px;border-color:#29292f}
+.logo{width:47px;height:47px;border-radius:14px;border-color:#ff203d;background:linear-gradient(145deg,#310810,#0a0a0c);box-shadow:inset 0 0 18px #ff203d1c,0 0 22px #ff203d12}
+.brand-name{font-size:15px;letter-spacing:2.25px}
+.status-pill{background:linear-gradient(120deg,#151015,#0b0b0d);border-color:#353037;box-shadow:inset 0 1px rgba(255,255,255,.035)}
+.pulse.good{box-shadow:0 0 12px #77e8ad77}
+.layout{gap:29px}
+.nav-item{transition:background .18s,border-color .18s,color .18s,transform .18s}
+.nav-item:hover{transform:translateX(2px);border-color:#ff203d36;background:#ff203d0c;color:#eee}
+.hero-copy{padding-top:31px}
+h1{letter-spacing:-3.2px;text-shadow:0 8px 45px #ff203d12}
+h1 span{text-shadow:0 0 28px #ff203d28}
+.server-card{border-color:#41212a;border-radius:18px;background:linear-gradient(140deg,#1b0d11,#0b0b0e 58%,#101014);box-shadow:inset 0 1px rgba(255,255,255,.035),0 16px 50px #0005}
+.server-card:after{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(112deg,transparent 25%,rgba(255,32,61,.09) 44%,transparent 59%);transform:translateX(-120%);animation:ledergSweep 11s ease-in-out infinite}
+@keyframes ledergSweep{0%,65%{transform:translateX(-120%)}88%,100%{transform:translateX(120%)}}
+.endpoint{border-color:#373039;background:linear-gradient(135deg,#09090b,#0d0b0d)}
+.panel{border-color:#303037;border-radius:15px;background:linear-gradient(145deg,#121216,#09090c);box-shadow:inset 0 1px rgba(255,255,255,.025);transition:border-color .18s,transform .18s}
+.panel:hover{border-color:#4a2931}
+.field{border-color:#34343b;background:#08080a;transition:border-color .16s,box-shadow .16s}
+.field:focus{border-color:var(--red);box-shadow:0 0 0 3px #ff203d1a,0 0 20px #ff203d0b}
+.play-btn{position:relative;overflow:hidden;border-radius:11px;background:linear-gradient(105deg,#ff203d 0%,#e41735 52%,#9e0d27 100%);box-shadow:0 11px 30px #ff203d25,inset 0 1px rgba(255,255,255,.22);transition:filter .18s,transform .18s,box-shadow .18s}
+.play-btn:hover{filter:brightness(1.1);transform:translateY(-2px);box-shadow:0 15px 35px #ff203d35,inset 0 1px rgba(255,255,255,.24)}
+.play-btn:active{transform:translateY(0)}
+.play-btn:disabled{filter:grayscale(.25);box-shadow:none}
+.install-row{border-color:#303037;background:#09090c}
+.install-icon{border-color:#54212c;background:linear-gradient(145deg,#2a0c13,#12090c);box-shadow:inset 0 0 14px #ff203d10}
+.choose-btn,.copy-btn,.sub-btn,.icon-btn{transition:border-color .16s,color .16s,background .16s}
+.sub-btn{border-color:#383840;background:linear-gradient(110deg,#19191e,#101014)}
+.progress-track{background:#2a2a31}
+.progress-fill{background:linear-gradient(90deg,#a90d27,#ff203d,#ff8797);box-shadow:0 0 13px #ff203d40}
+.info-tile{border-color:#2e2e35;background:linear-gradient(145deg,#101014,#09090c)}
+.footer{border-color:#25252b}
+button:focus-visible{outline:2px solid #ff5269;outline-offset:3px}
+@media(max-width:960px){.app{padding:18px}.hero-copy{padding-top:12px}}
+@media(max-width:540px){.app{padding:12px}.brand-name{font-size:11px}}
+@media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+
+</style>
+</head>
+<body>
+<div class="app"><div class="content">
+<header class="topbar">
+  <div class="brand"><div class="logo">L<span style="color:var(--red)">/</span></div><div><div class="brand-name">LEDERG <em>CR:MP</em></div><div class="brand-sub">OFFICIAL GAME LAUNCHER</div></div></div>
+  <div class="top-actions"><div class="status-pill"><span class="pulse" id="topPulse"></span><span id="topStatus">ПРОВЕРКА КЛИЕНТА</span></div><button class="icon-btn" id="openFolder" title="Открыть папку игры">↗</button></div>
+</header>
+<div class="layout">
+<aside class="sidebar">
+  <div class="side-title">НАВИГАЦИЯ</div>
+  <button class="nav-item active" data-scroll="overview"><span class="nav-ico">◈</span> Главная</button>
+  <button class="nav-item" data-scroll="play"><span class="nav-ico">▶</span> Запуск игры</button>
+  <button class="nav-item" data-scroll="client"><span class="nav-ico">▣</span> Файлы клиента</button>
+  <div class="sidebar-foot">BUILD / 01<strong>LEDERG SYSTEM</strong>DIRECT CONNECT</div>
+</aside>
+<main class="main" id="overview">
+<section class="hero">
+  <div class="hero-copy"><div class="eyebrow">CR:MP // NATIVE CLIENT</div><h1>ЗАПУСКАЙ.<br><span>НЕ ЖДИ.</span></h1><p class="lead">LEDERG CR:MP — прямой запуск игрового клиента <strong>без окна Multiplayer Browser</strong>. Оболочка загружает актуальную версию интерфейса из GitHub и хранит последнюю рабочую копию.</p><div class="tags"><span class="tag"><b>01</b> AUTO UPDATE</span><span class="tag"><b>02</b> CLIENT CHECK</span><span class="tag"><b>03</b> DIRECT CONNECT</span></div></div>
+  <div class="server-card"><div class="card-top"><div class="card-label">ПОДКЛЮЧЕНИЕ СЕРВЕРА</div><div class="ready-badge" id="clientBadge">CLIENT CHECK</div></div><div class="server-name">LEDERG <span style="color:var(--red)">PROJECT</span></div><div class="server-sub">CRIMINAL RUSSIA MULTIPLAYER</div><div class="endpoint"><div><small>SERVER ADDRESS</small><strong id="endpoint">188.127.241.8:1130</strong></div><button class="copy-btn" id="copyEndpoint">КОПИРОВАТЬ</button></div></div>
+</section>
+<section id="play"><div class="section-head"><div><div class="section-title">ГОТОВ К ИГРЕ?</div><div class="section-desc">ПРОВЕРЬ НИКНЕЙМ И ЗАПУСТИ КЛИЕНТ НАПРЯМУЮ</div></div><div class="section-number">01 / PLAY</div></div>
+<div class="play-grid">
+<div class="panel"><div class="panel-head"><h2>ПРОФИЛЬ И ПОДКЛЮЧЕНИЕ</h2><div class="panel-index">LEDERG / 001</div></div><div class="field-label"><label for="nickname">ИГРОВОЙ НИКНЕЙМ</label><span>ДО 24 СИМВОЛОВ</span></div><input class="field" id="nickname" maxlength="24" autocomplete="nickname" spellcheck="false" value="LEDERG"><button class="play-btn" id="playButton" disabled><span id="playLabel">ПРОВЕРЯЮ КЛИЕНТ</span><span class="arrow">↗</span></button><div class="play-note"><span class="mini-dot"></span><span id="playNote">Проверка файлов перед запуском.</span></div></div>
+<div class="panel" id="client"><div class="panel-head"><h2>ИГРОВОЙ КЛИЕНТ</h2><div class="panel-index">02 / FILES</div></div><div class="install-row"><div class="install-icon">▣</div><div class="install-copy"><strong id="installTitle">ПАПКА ИГРЫ</strong><span id="installPath">Выбери папку установки</span></div><button class="choose-btn" id="chooseFolder">ВЫБРАТЬ</button></div><button class="sub-btn" id="installButton">СКАЧАТЬ / ВОССТАНОВИТЬ ФАЙЛЫ</button><div class="progress-track"><div class="progress-fill" id="progressFill"></div></div><div class="progress-info"><span id="progressLabel">ГОТОВ К ПРОВЕРКЕ</span><strong id="progressPercent">0%</strong></div><div class="status-line"><span class="status-light" id="statusLight"></span><span id="statusText">Подключаюсь к GitHub…</span></div></div>
+</div>
+<div class="bottom-grid"><div class="info-tile"><div class="info-kicker">CLIENT</div><div class="info-value" id="clientState">ПРОВЕРКА</div></div><div class="info-tile"><div class="info-kicker">LAUNCH MODE</div><div class="info-value good">NATIVE / NO BROWSER</div></div><div class="info-tile"><div class="info-kicker">UPDATE SOURCE</div><div class="info-value red">GITHUB / LIVE</div></div></div></section>
+</main></div><footer class="footer"><span>LEDERG CR:MP / LAUNCH SYSTEM</span><span>BLACK × RED / BUILD FROM GITHUB</span></footer>
+</div></div><div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script>
+const WEB_DOWNLOAD_URL = "https://github.com/LEDERG777-TEXNARIC/lederg-luncher-new/releases/latest";
+const OPEN_BROWSER_UNSUPPORTED = "A browser page cannot launch or update local Windows game files; download the native launcher.";
+const $ = id => document.getElementById(id);
+let latestState = {};
+let busyUi = false;
+let nativeShellAvailable = false;
+let isBrowserFallback = false;
+let refreshTimerStarted = false;
+let toastTimer = 0;
+function toast(message){$("toast").textContent=String(message||"");$("toast").classList.add("show");clearTimeout(toastTimer);toastTimer=setTimeout(()=>$("toast").classList.remove("show"),3600);}
+function setBusy(value){busyUi=Boolean(value);$("playButton").disabled=busyUi||(!isBrowserFallback&&!latestState.client_ready);$("installButton").disabled=busyUi;$("chooseFolder").disabled=busyUi;$("playLabel").textContent=busyUi?"ВЫПОЛНЯЕТСЯ ОПЕРАЦИЯ…":(isBrowserFallback?"СКАЧАТЬ LEDERG CR:MP ДЛЯ WINDOWS":(latestState.client_ready?"ИГРАТЬ В LEDERG CR:MP":"СНАЧАЛА УСТАНОВИ КЛИЕНТ"));}
+function applyState(state){
+ if(!state||typeof state!=="object")return;latestState=state;
+ $("endpoint").textContent=state.endpoint||"—";$("installPath").textContent=state.install_path||"Выбери папку установки";
+ $("installTitle").textContent=state.client_ready?"КЛИЕНТ НАЙДЕН":"ПАПКА ИГРЫ";$("clientBadge").textContent=state.client_ready?"CLIENT READY":"NEEDS INSTALL";
+ $("clientBadge").style.color=state.client_ready?"var(--green)":"var(--amber)";$("topPulse").classList.toggle("good",Boolean(state.client_ready));
+ $("topStatus").textContent=state.busy?"ОБНОВЛЕНИЕ":(state.client_ready?"КЛИЕНТ ГОТОВ":"НУЖНА УСТАНОВКА");
+ $("clientState").textContent=state.client_ready?"READY":"NOT INSTALLED";$("clientState").classList.toggle("good",Boolean(state.client_ready));$("clientState").classList.toggle("red",!state.client_ready);
+ $("statusText").textContent=state.status||"Готов";$("statusLight").classList.toggle("good",Boolean(state.client_ready)&&!state.busy);$("statusLight").classList.toggle("bad",state.phase==="error");
+ $("progressFill").style.width=String(Math.max(0,Math.min(100,Number(state.progress||0))))+"%";
+ $("progressPercent").textContent=String(Math.round(Number(state.progress||0)))+"%";
+ $("progressLabel").textContent=state.progress_label||(state.client_ready?"КЛИЕНТ ПРОВЕРЕН":"ГОТОВ К УСТАНОВКЕ");
+ $("installButton").textContent=state.busy?"ВЫПОЛНЯЕТСЯ…":(state.client_ready?"ПРОВЕРИТЬ / ОБНОВИТЬ ФАЙЛЫ":"СКАЧАТЬ / УСТАНОВИТЬ КЛИЕНТ");
+ $("playNote").textContent=state.client_ready?"Подключение запускается без окна Multiplayer Browser.":"Сначала скачай клиент в выбранную папку.";
+ if(state.nickname&&!$("nickname").matches(":focus"))$("nickname").value=state.nickname;
+ setBusy(Boolean(state.busy));
+}
+async function apiCall(method,...args){
+ if(!window.pywebview||!window.pywebview.api||typeof window.pywebview.api[method]!=="function"){toast("Нативная оболочка ещё не готова. Перезапусти LEDERG CR:MP.");return null;}
+ try{return await window.pywebview.api[method](...args);}catch(error){toast(error&&error.message?error.message:"Ошибка вызова нативной функции");return null;}
+}
+async function refreshState(){const state=await apiCall("get_state");if(state)applyState(state);}
+$("chooseFolder").addEventListener("click",async()=>{if(!nativeShellAvailable){window.open(WEB_DOWNLOAD_URL,"_blank","noopener,noreferrer");return;}setBusy(true);const result=await apiCall("choose_folder");if(result){if(result.message)toast(result.message);if(result.state)applyState(result.state);}setBusy(false);});
+$("installButton").addEventListener("click",async()=>{if(!nativeShellAvailable){window.open(WEB_DOWNLOAD_URL,"_blank","noopener,noreferrer");return;}if(busyUi)return;const result=await apiCall("start_install");if(result)toast(result.message||(result.ok?"Проверка клиента запущена.":"Не удалось запустить установку."));await refreshState();});
+$("playButton").addEventListener("click",async()=>{if(!nativeShellAvailable){window.open(WEB_DOWNLOAD_URL,"_blank","noopener,noreferrer");return;}if(busyUi)return;setBusy(true);await apiCall("set_nickname",$("nickname").value);const result=await apiCall("launch_game",$("nickname").value);if(result)toast(result.message||(result.ok?"Клиент запущен.":"Не удалось запустить игру."));await refreshState();});
+$("nickname").addEventListener("change",()=>{if(nativeShellAvailable)apiCall("set_nickname",$("nickname").value);});
+$("openFolder").addEventListener("click",async()=>{const result=await apiCall("open_game_folder");if(result&&result.message)toast(result.message);});
+$("copyEndpoint").addEventListener("click",async()=>{const value=$("endpoint").textContent;try{await navigator.clipboard.writeText(value);toast("Адрес скопирован.");}catch(_){toast(value);}});
+document.querySelectorAll("[data-scroll]").forEach(button=>button.addEventListener("click",()=>{document.querySelectorAll(".nav-item").forEach(item=>item.classList.remove("active"));button.classList.add("active");const target=$(button.dataset.scroll);if(target)target.scrollIntoView({behavior:"smooth",block:"start"});}));
+function initLauncherSurface(){
+ nativeShellAvailable=Boolean(window.pywebview&&window.pywebview.api);
+ if(nativeShellAvailable){isBrowserFallback=false;if(!refreshTimerStarted){refreshTimerStarted=true;refreshState();setInterval(refreshState,1800);}return;}
+ isBrowserFallback=true;
+ $("topStatus").textContent="NATIVE APP REQUIRED";
+ $("clientBadge").textContent="WINDOWS EXE";
+ $("clientState").textContent="DOWNLOAD REQUIRED";
+ $("clientState").classList.remove("good");$("clientState").classList.add("red");
+ $("statusText").textContent=OPEN_BROWSER_UNSUPPORTED;
+ $("statusLight").classList.remove("good");$("statusLight").classList.add("bad");
+ $("progressLabel").textContent="NATIVE WINDOWS APP";$("progressPercent").textContent="—";
+ $("installTitle").textContent="LEDERG CR:MP ДЛЯ WINDOWS";
+ $("installPath").textContent="Скачай EXE, чтобы установить клиент и запускать игру";
+ $("installButton").textContent="СКАЧАТЬ LEDERG CR:MP ДЛЯ WINDOWS";
+ $("playNote").textContent="Веб-сайт не может запускать локальные программы. Скачай Windows-лаунчер.";
+ $("chooseFolder").classList.add("hidden");$("openFolder").classList.add("hidden");
+ $("playButton").disabled=false;setBusy(false);
+}
+window.addEventListener("pywebviewready",initLauncherSurface);
+window.addEventListener("DOMContentLoaded",initLauncherSurface);
+</script>
+</body></html>

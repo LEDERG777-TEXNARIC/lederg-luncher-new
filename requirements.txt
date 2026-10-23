@@ -1,0 +1,5 @@
+requests>=2.32,<3
+beautifulsoup4>=4.13,<5
+typing_extensions>=4.12
+pywebview>=6.0,<7
+pyinstaller>=6.10,<7

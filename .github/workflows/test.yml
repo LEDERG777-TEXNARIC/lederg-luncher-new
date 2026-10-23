@@ -1,0 +1,20 @@
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  unittest:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Keep canonical source line endings
+        run: git config core.autocrlf false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: python -m pip install -r requirements.txt
+      - run: python tools/update_runtime_manifest.py
+      - run: git diff --exit-code -- runtime-manifest.json
+      - run: python -m unittest discover -v
