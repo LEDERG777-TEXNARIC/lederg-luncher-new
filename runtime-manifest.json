@@ -12,8 +12,8 @@
     },
     {
       "path": "launcher.py",
-      "sha256": "1832a22c4e2a5f714f211e9fa28af22acaccd43ea5471e24cf88bbc6449db814",
-      "size": 108670
+      "sha256": "73c5bcfc03a889a378078eb901dd3ceb12a4414129d23c59bd05010f9b978d79",
+      "size": 109443
     },
     {
       "path": "web_runtime.py",
@@ -27,5 +27,5 @@
     }
   ],
   "schema": 1,
-  "version": "2.1.4"
+  "version": "2.1.5"
 }
