@@ -89,11 +89,36 @@ class LauncherTests(unittest.TestCase):
     def test_default_launch_mode_is_direct_and_browser_free(self):
         self.assertEqual(DEFAULT_LAUNCH_MODE, "direct")
 
-    def test_archive_fallback_uses_the_google_drive_client_source(self):
+    def test_archive_fallback_uses_google_drive_virus_scan_confirmation(self):
         self.assertEqual(
             ZIP_URL,
-            "https://drive.usercontent.google.com/download?id=1981J9qVnGbEjLK7lXg7L2AO1br0ATRct&export=download",
+            "https://drive.usercontent.google.com/download?id=1981J9qVnGbEjLK7lXg7L2AO1br0ATRct&export=download&confirm=t",
         )
+
+    def test_google_drive_release_url_adds_virus_scan_confirmation(self):
+        payload = {
+            "schema": 1,
+            "version": "test",
+            "archive_url": "https://drive.usercontent.google.com/download?id=123&export=download",
+        }
+
+        release = fetch_release_manifest(
+            fetcher=lambda *_args, **_kwargs: FakeResponse(payload=payload)
+        )
+        self.assertIn("confirm=t", release["archive_url"])
+        self.assertEqual(release["archive_size"], 0)
+
+    def test_existing_google_drive_confirmation_is_not_duplicated(self):
+        payload = {
+            "schema": 1,
+            "version": "test",
+            "archive_url": "https://drive.usercontent.google.com/download?id=123&export=download&confirm=t",
+        }
+
+        release = fetch_release_manifest(
+            fetcher=lambda *_args, **_kwargs: FakeResponse(payload=payload)
+        )
+        self.assertEqual(release["archive_url"].count("confirm="), 1)
 
     def test_server_address_is_loaded_from_the_ip_repository(self):
         self.assertEqual(

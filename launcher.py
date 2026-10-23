@@ -37,9 +37,9 @@ APP_NAME = "LEDERG CR:MP"
 # addresses and client releases can be changed without rebuilding the EXE.
 SERVER_IP_URL = "https://raw.githubusercontent.com/LEDERG777-TEXNARIC/lederg-ip-crmp/main/ip"
 CLIENT_MANIFEST_URL = "https://raw.githubusercontent.com/LEDERG777-TEXNARIC/lederg-client/main/client.json"
-ZIP_URL = "https://drive.usercontent.google.com/download?id=1981J9qVnGbEjLK7lXg7L2AO1br0ATRct&export=download"
+ZIP_URL = "https://drive.usercontent.google.com/download?id=1981J9qVnGbEjLK7lXg7L2AO1br0ATRct&export=download&confirm=t"
 CLIENT_FILES_MANIFEST_URL = "https://oddly-hopeful-rudd.cloudpub.ru/client-manifest.json"
-ZIP_SIZE = 0
+ZIP_SIZE = 4_006_928_307
 SERVER_HOST = "188.127.241.8"
 SERVER_PORT = 1130
 DEFAULT_LAUNCH_MODE = "direct"
@@ -150,6 +150,14 @@ def fetch_release_manifest(fetcher=None) -> dict:
         raise ValueError("URL архива должен использовать HTTP или HTTPS.")
     elif parsed.scheme.lower() == "http" and not (parsed.hostname or "").lower().endswith(".cloudpub.ru"):
         raise ValueError("Незашифрованный HTTP разрешён только для домена Cloudpub.")
+    # Large Google Drive archives can trigger a virus-scan confirmation page.
+    # Carry the same confirmation query on each HEAD/GET so we receive the ZIP,
+    # not a small HTML warning document.
+    parsed = urlparse(archive_url)
+    if (parsed.hostname or "").lower() in {"drive.google.com", "drive.usercontent.google.com"}:
+        query = parse_qs(parsed.query, keep_blank_values=True)
+        if not query.get("confirm"):
+            archive_url += ("&" if parsed.query else "?") + "confirm=t"
     if files_manifest_url:
         files_parsed = urlparse(files_manifest_url)
         if not files_parsed.scheme:
