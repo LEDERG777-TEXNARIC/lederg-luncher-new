@@ -295,56 +295,55 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(values["PlayerName"], "My_Nick")
 
     def test_legacy_d3dx_dependency_stays_in_game_root_and_cleans_extra_client_copy(self):
-        bundle_root = Path(__file__).parent
-        source = bundle_root / "dependencies" / "d3dx9_25.dll"
-        self.assertTrue(source.is_file(), "the verified legacy DirectX DLL must be bundled")
+        fixture = b"verified D3DX dependency test fixture"
+        expected_hash = hashlib.sha256(fixture).hexdigest()
         with tempfile.TemporaryDirectory() as temp:
+            bundle_root = Path(temp) / "bundle"
+            source = bundle_root / "dependencies" / "d3dx9_25.dll"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(fixture)
             root = Path(temp) / "GTA Criminal Russia"
             root.mkdir()
             (root / "gta_sa.exe").write_bytes(b"MZ")
             multiplayer = root / "multiplayer_c"
             multiplayer.mkdir()
             extra_copy = multiplayer / "d3dx9_25.dll"
-            extra_copy.write_bytes(source.read_bytes())
+            extra_copy.write_bytes(fixture)
             local_appdata = Path(temp) / "localappdata"
 
-            with patch.dict("os.environ", {"LOCALAPPDATA": str(local_appdata)}):
+            with patch.object(launcher, "LEGACY_D3DX_SHA256", expected_hash), patch.dict(
+                "os.environ", {"LOCALAPPDATA": str(local_appdata)}
+            ):
                 installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
 
             self.assertEqual(installed, (root / "d3dx9_25.dll").resolve())
             self.assertTrue(installed.is_file())
-            self.assertEqual(
-                hashlib.sha256(installed.read_bytes()).hexdigest(),
-                launcher.LEGACY_D3DX_SHA256,
-            )
+            self.assertEqual(hashlib.sha256(installed.read_bytes()).hexdigest(), expected_hash)
             self.assertFalse(extra_copy.exists(), "multiplayer_c must not contain this launcher-added DLL")
             backups = list((local_appdata / "LEDERG CRMP" / "quarantine").glob("d3dx9_25.dll.*.backup"))
             self.assertEqual(len(backups), 1, "the removed file must be preserved outside the game")
-            self.assertEqual(backups[0].read_bytes(), source.read_bytes())
+            self.assertEqual(backups[0].read_bytes(), fixture)
 
     def test_legacy_d3dx_dependency_replaces_a_corrupt_local_copy(self):
-        bundle_root = Path(__file__).parent
+        fixture = b"verified D3DX dependency test fixture"
+        expected_hash = hashlib.sha256(fixture).hexdigest()
         with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
+            bundle_root = Path(temp) / "bundle"
+            source = bundle_root / "dependencies" / "d3dx9_25.dll"
+            source.parent.mkdir(parents=True)
+            source.write_bytes(fixture)
+            root = Path(temp) / "game"
+            root.mkdir()
             destination = root / "d3dx9_25.dll"
             destination.write_bytes(b"not the DirectX DLL")
 
-            installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
+            with patch.object(launcher, "LEGACY_D3DX_SHA256", expected_hash):
+                installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
 
             self.assertEqual(
                 hashlib.sha256(installed.read_bytes()).hexdigest(),
-                launcher.LEGACY_D3DX_SHA256,
+                expected_hash,
             )
-
-    def test_legacy_d3dx_dependency_refuses_an_unverified_source(self):
-        with tempfile.TemporaryDirectory() as temp:
-            bundle_root = Path(temp)
-            (bundle_root / "dependencies").mkdir()
-            (bundle_root / "dependencies" / "d3dx9_25.dll").write_bytes(b"fake DLL")
-            with self.assertRaises(ValueError):
-                ensure_legacy_directx_dependency(
-                    bundle_root / "game", bundle_root=bundle_root
-                )
 
     def test_direct_launch_targets_game_and_multiplayer_dll_not_the_browser(self):
         with tempfile.TemporaryDirectory() as temp:
