@@ -485,10 +485,6 @@ def ensure_legacy_directx_dependency(
     """Install only the verified x86 D3DX9 dependency required by the shipped client."""
     root = Path(game_root).resolve()
     destination = root / LEGACY_D3DX_DLL_NAME
-    targets = [destination]
-    multiplayer_dir = root / "multiplayer_c"
-    if multiplayer_dir.is_dir():
-        targets.append(multiplayer_dir / LEGACY_D3DX_DLL_NAME)
 
     def digest(path: Path) -> str:
         hasher = hashlib.sha256()
@@ -497,10 +493,29 @@ def ensure_legacy_directx_dependency(
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    if all(
-        target.is_file() and digest(target) == LEGACY_D3DX_SHA256
-        for target in targets
-    ):
+    # D3DX9 belongs beside gta_sa.exe. Older launcher builds incorrectly copied
+    # it into multiplayer_c too, where the client rejects it as an extra file.
+    # Preserve that old copy outside the installation before removing it.
+    extra_copy = root / "multiplayer_c" / LEGACY_D3DX_DLL_NAME
+    if extra_copy.is_file() or extra_copy.is_symlink():
+        quarantine = Path(
+            os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+        ) / "LEDERG CRMP" / "quarantine"
+        try:
+            quarantine.mkdir(parents=True, exist_ok=True)
+            backup = quarantine / f"{LEGACY_D3DX_DLL_NAME}.{time.time_ns()}.backup"
+            shutil.move(str(extra_copy), str(backup))
+            write_launcher_log(
+                f"Removed extra client DLL from protected multiplayer_c folder; "
+                f"preserved backup at {backup}."
+            )
+        except OSError as exc:
+            raise OSError(
+                f"Не удалось убрать лишний файл {extra_copy}. "
+                "Закрой игру и проверь права на папку клиента."
+            ) from exc
+
+    if destination.is_file() and digest(destination) == LEGACY_D3DX_SHA256:
         return destination
 
     if bundle_root is None:
@@ -521,30 +536,26 @@ def ensure_legacy_directx_dependency(
         )
 
     root.mkdir(parents=True, exist_ok=True)
-    for target in targets:
-        if target.is_file() and digest(target) == LEGACY_D3DX_SHA256:
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        handle, temp_name = tempfile.mkstemp(
-            prefix=".lederg-d3dx-", suffix=".tmp", dir=str(target.parent)
-        )
-        os.close(handle)
-        temporary = Path(temp_name)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(
+        prefix=".lederg-d3dx-", suffix=".tmp", dir=str(destination.parent)
+    )
+    os.close(handle)
+    temporary = Path(temp_name)
+    try:
+        shutil.copyfile(source, temporary)
+        if digest(temporary) != LEGACY_D3DX_SHA256:
+            raise ValueError("Контрольная сумма D3DX9 изменилась при копировании.")
+        os.replace(temporary, destination)
+    finally:
         try:
-            shutil.copyfile(source, temporary)
-            if digest(temporary) != LEGACY_D3DX_SHA256:
-                raise ValueError("Контрольная сумма D3DX9 изменилась при копировании.")
-            os.replace(temporary, target)
-        finally:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-        write_launcher_log(
-            f"Installed verified legacy DirectX dependency: {target}; SHA-256={LEGACY_D3DX_SHA256}."
-        )
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    write_launcher_log(
+        f"Installed verified legacy DirectX dependency: {destination}; SHA-256={LEGACY_D3DX_SHA256}."
+    )
     return destination
-
 
 def connect_via_browser_ui(executable: Path, host: str, port: int, nickname: str = "LEDERG") -> subprocess.Popen:
     """Launch the legacy CR:MP browser and drive its native server/connect dialogs."""
