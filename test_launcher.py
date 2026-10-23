@@ -294,16 +294,18 @@ class LauncherTests(unittest.TestCase):
             self.assertEqual(values["gta_sa_exe"], str(game.resolve()))
             self.assertEqual(values["PlayerName"], "My_Nick")
 
-    def test_legacy_d3dx_dependency_is_copied_and_verified(self):
+    def test_legacy_d3dx_dependency_stays_in_game_root_and_cleans_extra_client_copy(self):
         bundle_root = Path(__file__).parent
         source = bundle_root / "dependencies" / "d3dx9_25.dll"
-        self.assertTrue(source.is_file(), "the signed legacy DirectX DLL must be bundled")
+        self.assertTrue(source.is_file(), "the verified legacy DirectX DLL must be bundled")
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "GTA Criminal Russia"
             root.mkdir()
             (root / "gta_sa.exe").write_bytes(b"MZ")
             multiplayer = root / "multiplayer_c"
             multiplayer.mkdir()
+            extra_copy = multiplayer / "d3dx9_25.dll"
+            extra_copy.write_bytes(source.read_bytes())
 
             installed = ensure_legacy_directx_dependency(root, bundle_root=bundle_root)
 
@@ -313,10 +315,7 @@ class LauncherTests(unittest.TestCase):
                 hashlib.sha256(installed.read_bytes()).hexdigest(),
                 launcher.LEGACY_D3DX_SHA256,
             )
-            self.assertEqual(
-                hashlib.sha256((multiplayer / "d3dx9_25.dll").read_bytes()).hexdigest(),
-                launcher.LEGACY_D3DX_SHA256,
-            )
+            self.assertFalse(extra_copy.exists(), "multiplayer_c must not contain this launcher-added DLL")
 
     def test_legacy_d3dx_dependency_replaces_a_corrupt_local_copy(self):
         bundle_root = Path(__file__).parent
