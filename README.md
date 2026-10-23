@@ -7,7 +7,8 @@ Native Windows launcher with a live HTML/CSS/JavaScript interface delivered from
 - At startup, bootstrap.py retrieves runtime-manifest.json from the main branch.
 - The manifest is allow-listed and every runtime file is checked against its exact byte size and SHA-256 hash before use.
 - The last verified version is cached in %LOCALAPPDATA%\LEDERG CRMP\runtime. When GitHub is unavailable, the launcher falls back to the verified cache or embedded first-run files.
-- UI edits in web/index.html and changes to the runtime modules are picked up on the next launch without downloading a new EXE. The direct-connect helper is embedded in the Windows EXE and starts gta_sa.exe with the multiplayer DLL and configured server endpoint.
+- UI edits in web/index.html and changes to the runtime modules are picked up on the next launch without downloading a new EXE. Play uses the official `multiplayer_c/multiplayer_browser_cr.exe` bootstrap with `host:port -n nickname`; it must initialize Multiplayer adaptation itself. Starting `grand_theft_auto_san_andreas.dll` directly or injecting `san_andreas_multiplayer.dll` into `gta_sa.exe` bypasses the custom client's game-type detection and produces “Не могу определить тип игры.”
+- Before Play, the launcher writes `HKCU\\Software\\SAMP\\gta_sa_exe` to the selected `gta_sa.exe` and installs the bundled x86 `d3dx9_25.dll` only after checking its pinned SHA-256. The original DLL is from Microsoft's DirectX legacy redistributable (June 2010).
 - Game files are updated independently through the existing client manifest, with per-file CRC validation and resumable downloads.
 
 ## LEDERG COMMAND / accelerated client transfer
@@ -29,7 +30,7 @@ Use Python 3.14 x64 on Windows.
    `%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe /nologo /platform:x86 /target:exe /out:LEDERG-DirectLaunch.exe direct_launcher.cs`
 5. Build with: pyinstaller --clean --noconfirm "LEDERG CRMP.spec"
 
-Run tools/update_runtime_manifest.py after changing launcher.py, client_updates.py, radio_sync.py, web_runtime.py, or web/index.html; commit the updated manifest in the same change.
+Run tools/update_runtime_manifest.py after changing launcher.py, client_updates.py, radio_sync.py, web_runtime.py, or web/index.html; commit the updated manifest in the same change. The default launch mode is `samp-cli`, and the runtime monitor tracks the actual game process after `multiplayer_browser_cr.exe` exits.
 
 ## Release model
 
