@@ -2,8 +2,8 @@
   "files": [
     {
       "path": "client_updates.py",
-      "sha256": "597add7ec9b56a792f0e739a6e350114adde2a14b2a32811ea6086ed83f9fda0",
-      "size": 13451
+      "sha256": "f2f223d140b62bbfc861ee37ba0f6fe34373fa98211190b98729ba968f02c418",
+      "size": 13851
     },
     {
       "path": "radio_sync.py",
@@ -27,5 +27,5 @@
     }
   ],
   "schema": 1,
-  "version": "2.5.5"
+  "version": "2.5.6"
 }
