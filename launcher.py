@@ -1541,10 +1541,16 @@ def _open_google_drive_response(
         timeout=timeout,
     )
     content_type = (response.headers.get("Content-Type") or "").lower()
-    if "text/html" not in content_type:
+    # Some Google front ends incorrectly label the confirmation page as binary.
+    # Inspect the first streamed bytes as well as Content-Type before treating it as an archive.
+    probe_stream = response.iter_content(chunk_size=64 * 1024)
+    first_chunk = next(probe_stream, b"")
+    looks_like_html = first_chunk.lstrip().lower().startswith((b"<!doctype html", b"<html"))
+    if "text/html" not in content_type and not looks_like_html:
+        response._lederg_prefetched_chunk = first_chunk
         return response, url
-    body = bytearray()
-    for chunk in response.iter_content(chunk_size=64 * 1024):
+    body = bytearray(first_chunk)
+    for chunk in probe_stream:
         if chunk:
             body.extend(chunk)
             if len(body) > 2 * 1024 * 1024:
@@ -1564,12 +1570,16 @@ def _open_google_drive_response(
         timeout=timeout,
     )
     confirmed_type = (confirmed.headers.get("Content-Type") or "").lower()
-    if "text/html" in confirmed_type:
+    confirm_probe = confirmed.iter_content(chunk_size=64 * 1024)
+    confirm_first = next(confirm_probe, b"")
+    confirm_html = confirm_first.lstrip().lower().startswith((b"<!doctype html", b"<html"))
+    if "text/html" in confirmed_type or confirm_html:
         confirmed.close()
         raise RuntimeError(
-            "Google Drive снова вернул HTML вместо архива. "
-            "Проверь, что файл доступен по ссылке и не требует авторизации."
+            "Google Drive повторно вернул HTML вместо ZIP. Проверь доступ «Все, у кого есть ссылка» "
+            "и наличие файла по ссылке клиента; HTML не сохраняется как архив."
         )
+    confirmed._lederg_prefetched_chunk = confirm_first
     return confirmed, confirmed_url
 
 
@@ -1724,7 +1734,11 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
                 received = offset
                 mode = "ab" if offset else "wb"
                 with partial.open(mode) as output:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    prefetched = getattr(response, "_lederg_prefetched_chunk", b"")
+                    stream_chunks = response.iter_content(chunk_size=1024 * 1024)
+                    if prefetched:
+                        stream_chunks = iter((prefetched, *stream_chunks))
+                    for chunk in stream_chunks:
                         if cancel is not None and cancel.is_set():
                             output.flush()
                             raise InterruptedError(
