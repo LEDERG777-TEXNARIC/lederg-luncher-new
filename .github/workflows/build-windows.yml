@@ -1,11 +1,11 @@
 name: Windows launcher
+permissions:
+  contents: write
 on:
   workflow_dispatch:
   push:
     branches: [main]
     tags: ["v*"]
-permissions:
-  contents: write
 jobs:
   build:
     runs-on: windows-latest
@@ -20,34 +20,11 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - run: python tools/update_runtime_manifest.py
       - run: git diff --exit-code -- runtime-manifest.json
-      - name: Prepare verified DirectX 9 legacy dependency
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $expectedHash = "4c54df27ce84d21b2924e64ff79b13e7876ce85d8e0c9c1d0abd8da73888187a"
-          $redist = Join-Path $env:RUNNER_TEMP "directx_Jun2010_redist.exe"
-          $unpack = Join-Path $env:RUNNER_TEMP "directx_Jun2010_redist"
-          $url = "https://download.microsoft.com/download/8/4/A/84A35BF1-DAFE-4AE8-82AF-AD2AE20B6B14/directx_Jun2010_redist.exe"
-          Invoke-WebRequest -Uri $url -OutFile $redist
-          $signature = Get-AuthenticodeSignature $redist
-          if ($signature.Status -ne "Valid" -or $signature.SignerCertificate.Subject -notmatch "Microsoft Corporation") {
-            throw "The DirectX redistributable signature is not valid Microsoft code."
-          }
-          New-Item -ItemType Directory -Force -Path $unpack, (Join-Path $PWD "dependencies") | Out-Null
-          Start-Process -FilePath $redist -ArgumentList @("/Q", ("/T:" + $unpack)) -Wait -NoNewWindow
-          $cab = Join-Path $unpack "Apr2005_d3dx9_25_x86.cab"
-          if (!(Test-Path $cab)) { throw "Required x86 DirectX CAB was not extracted." }
-          & expand.exe -F:d3dx9_25.dll $cab (Join-Path $PWD "dependencies")
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $dll = Join-Path $PWD "dependencies\d3dx9_25.dll"
-          $actualHash = (Get-FileHash $dll -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne $expectedHash) { throw "d3dx9_25.dll SHA-256 mismatch: $actualHash" }
-          $dllSignature = Get-AuthenticodeSignature $dll
-          if ($dllSignature.Status -ne "Valid" -or $dllSignature.SignerCertificate.Subject -notmatch "Microsoft Corporation") {
-            throw "Extracted d3dx9_25.dll signature is not valid Microsoft code."
-          }
-          Write-Host "Verified d3dx9_25.dll ($actualHash)"
       - run: python -m unittest discover -v
+      - name: Generate LEDERG application icon
+        run: |
+          python -m pip install Pillow
+          python tools/generate_icon.py
       - name: Build x86 direct-connect helper
         shell: pwsh
         run: |
@@ -57,19 +34,55 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path "LEDERG-DirectLaunch.exe")) { throw "Direct-connect helper was not produced." }
       - run: pyinstaller --clean --noconfirm "LEDERG CRMP.spec"
+      - name: Package source code, EXE cover, and checksums
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "dist" | Out-Null
+          Copy-Item "dist/LEDERG CRMP.exe" "dist/LEDERG.CRMP.exe" -Force
+          Copy-Item "LEDERG-CRMP-Avatar.ico" "dist/LEDERG-CRMP-Avatar.ico" -Force
+          Copy-Item "LEDERG-CRMP-Cover.png" "dist/LEDERG-CRMP-Cover.png" -Force
+          python tools/package_release.py
+          $source = Get-ChildItem "dist/LEDERG-CRMP-Source-v*.zip" | Select-Object -First 1
+          if (!$source) { throw "Source archive was not created." }
+          $files = @("dist/LEDERG.CRMP.exe", $source.FullName, "dist/LEDERG-CRMP-Avatar.ico", "dist/LEDERG-CRMP-Cover.png")
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $(Split-Path -Leaf $file)"
+          }
+          $lines | Set-Content -LiteralPath "dist/LEDERG-CRMP-SHA256SUMS.txt" -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: LEDERG-CRMP-Launcher-Windows-x64
-          path: dist/LEDERG CRMP.exe
+          name: LEDERG-CRMP-Release-Package
+          path: |
+            dist/LEDERG.CRMP.exe
+            dist/LEDERG-CRMP-Source-v*.zip
+            dist/LEDERG-CRMP-Avatar.ico
+            dist/LEDERG-CRMP-Cover.png
+            dist/LEDERG-CRMP-SHA256SUMS.txt
           if-no-files-found: error
-      - name: Publish launcher release
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v2.1.6-{0}', github.run_number) }}
-          target_commitish: ${{ github.sha }}
-          name: LEDERG CR:MP Launcher ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v2.1.6-{0}', github.run_number) }}
-          generate_release_notes: true
-          make_latest: true
-          fail_on_unmatched_files: true
-          files: dist/LEDERG CRMP.exe
+      - name: Publish GitHub Release asset
+        if: github.ref == 'refs/heads/main'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $manifest = Get-Content "runtime-manifest.json" -Raw | ConvertFrom-Json
+          $tag = "v$($manifest.version)"
+          $source = Get-ChildItem "dist/LEDERG-CRMP-Source-v*.zip" | Select-Object -First 1
+          $assets = @(
+            "dist/LEDERG.CRMP.exe",
+            $source.FullName,
+            "dist/LEDERG-CRMP-Avatar.ico",
+            "dist/LEDERG-CRMP-Cover.png",
+            "dist/LEDERG-CRMP-SHA256SUMS.txt"
+          )
+          if (!$source) { throw "Source archive is missing from the release package." }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title "LEDERG CR:MP Launcher $tag" --notes "Windows x64 LEDERG launcher. Assets include the compiled EXE, full tracked source package with tests and build workflow, PNG cover, ICO application icon, and SHA-256 checksums. The source package excludes binaries, databases, backups, logs, and credentials."
+          } else {
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "LEDERG CR:MP Launcher $tag" --notes "Windows x64 LEDERG launcher. Assets include the compiled EXE, full tracked source package with tests and build workflow, PNG cover, ICO application icon, and SHA-256 checksums. The source package excludes binaries, databases, backups, logs, and credentials."
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 
-REPOSITORY = "LEDERG777-TEXNARIC/lederg-luncher-new"
+REPOSITORY = "LEDERG777-TEXNARIC/lederg-luncher-crmp"
 BRANCH = "main"
 MANIFEST_URL = f"https://raw.githubusercontent.com/{REPOSITORY}/{BRANCH}/runtime-manifest.json"
 USER_HOME = Path(

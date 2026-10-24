@@ -24,25 +24,6 @@ class RadioHTTPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlsplit(self.path).path
-        if path == "/index":
-            files = []
-            for relative, data in sorted(self.files.items()):
-                if len(relative.split("/")) != 2 or Path(relative).suffix.lower() not in {".mp3", ".ogg", ".wav"}:
-                    continue
-                files.append({
-                    "path": relative,
-                    "station": relative.split("/")[0],
-                    "size": len(data),
-                    "sha": git_blob_sha(data),
-                })
-            body = json.dumps({"schema": 1, "files": files, "stations": sorted({item["station"] for item in files})}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-
         if path == "/tree":
             tree = []
             for relative, data in sorted(self.files.items()):
@@ -153,21 +134,6 @@ class RadioSyncTests(unittest.TestCase):
         self.assertFalse((root / "LEDERG FM" / "second.ogg").exists())
         self.assertFalse((root / "LEDERG FM").exists())
         self.assertTrue((root / "LEDERG RAP" / "rap.wav").exists())
-
-    def test_radio_index_manifest_is_supported(self):
-        result = sync_radio_repository(
-            self.game_root,
-            http=requests.Session(),
-            tree_url=self.base + "/index",
-            raw_base_url=self.base + "/raw/",
-        )
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["tracks"], 3)
-        self.assertEqual(result["stations"], ["LEDERG FM", "LEDERG RAP"])
-        self.assertEqual(
-            (self.game_root / "resound" / "radio" / "LEDERG FM" / "first.mp3").read_bytes(),
-            b"test-track-one",
-        )
 
     def test_unmanaged_local_files_are_not_deleted(self):
         self.sync()

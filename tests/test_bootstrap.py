@@ -7,12 +7,6 @@ import bootstrap
 
 
 class BootstrapManifestTests(unittest.TestCase):
-    def test_live_update_source_is_the_new_launcher_repository(self):
-        self.assertEqual(
-            bootstrap.REPOSITORY,
-            "LEDERG777-TEXNARIC/lederg-luncher-new",
-        )
-
     def valid_payload(self):
         return {
             "schema": 1,

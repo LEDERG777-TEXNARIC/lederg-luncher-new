@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ctypes
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import ipaddress
 import json
@@ -13,7 +12,6 @@ import socket
 import stat
 import sys
 import subprocess
-import tempfile
 import threading
 import time
 import tkinter as tk
@@ -21,7 +19,8 @@ import zipfile
 import zlib
 from pathlib import Path, PurePosixPath
 from tkinter import filedialog, messagebox
-from urllib.parse import parse_qs, quote, urlparse
+from html import unescape
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlparse, urlunparse
 
 import requests
 
@@ -39,20 +38,86 @@ APP_NAME = "LEDERG CR:MP"
 # addresses and client releases can be changed without rebuilding the EXE.
 SERVER_IP_URL = "https://raw.githubusercontent.com/LEDERG777-TEXNARIC/lederg-ip-crmp/main/ip"
 CLIENT_MANIFEST_URL = "https://raw.githubusercontent.com/LEDERG777-TEXNARIC/lederg-client/main/client.json"
-ZIP_URL = "https://drive.usercontent.google.com/download?id=1981J9qVnGbEjLK7lXg7L2AO1br0ATRct&export=download&confirm=t"
+DRIVE_FILE_ID = "1981J9qVnGbEjLK7lXg7L2AO1br0ATRct"
+DRIVE_DOWNLOAD_URL = (
+    "https://drive.usercontent.google.com/download"
+    f"?id={DRIVE_FILE_ID}&export=download"
+)
+# The full game archive is deliberately pinned to this single Google Drive file.
+# Per-file/Cloudpub manifests are disabled so no game payload comes from another host.
+ZIP_URL = DRIVE_DOWNLOAD_URL
 CLIENT_FILES_MANIFEST_URL = "https://oddly-hopeful-rudd.cloudpub.ru/client-manifest.json"
-ZIP_SIZE = 4_006_928_307
-PARALLEL_DOWNLOAD_WORKERS = 8
-PARALLEL_DOWNLOAD_MIN_SIZE = 32 * 1024 * 1024
-DEFAULT_CLIENT_EXPANDED_SIZE = 6 * 1024 * 1024 * 1024
+ZIP_SIZE = 0
 SERVER_HOST = "188.127.241.8"
 SERVER_PORT = 1130
-DEFAULT_LAUNCH_MODE = "samp-cli"
+DEFAULT_LAUNCH_MODE = "direct"
 DEFAULT_CLIENT_EXECUTABLE = "multiplayer_c/multiplayer_browser_cr.exe"
 DIRECT_LAUNCHER_NAME = "LEDERG-DirectLaunch.exe"
-LEGACY_D3DX_DLL_NAME = "d3dx9_25.dll"
-LEGACY_D3DX_SHA256 = "4c54df27ce84d21b2924e64ff79b13e7876ce85d8e0c9c1d0abd8da73888187a"
-DIRECTX_LEGACY_RUNTIME_URL = "https://www.microsoft.com/en-us/download/details.aspx?id=8109"
+
+CLIENT_INTEGRITY_FILENAME = ".lederg-client-integrity.json"
+CLIENT_REQUIRED_DIRECTORIES = (
+    "anim",
+    "audio",
+    "audio/CONFIG",
+    "audio/SFX",
+    "audio/streams",
+    "cleo",
+    "data",
+    "models",
+    "movies",
+    "text",
+    "multiplayer_c",
+)
+CLIENT_REQUIRED_FILES = (
+    "gta_sa.exe",
+    "cleo.asi",
+    "eax.dll",
+    "GTAINTERFACE.dll",
+    "LibMP.dll",
+    "ogg.dll",
+    "anim/anim.img",
+    "multiplayer_c/multiplayer_browser_cr.exe",
+    "multiplayer_c/grand_theft_auto_san_andreas.dll",
+    "multiplayer_c/san_andreas_multiplayer.dll",
+    # Runtime dependencies visible in the supplied GTA Criminal Russia Drive folder.
+    "multiplayer_c/adapt.dll",
+    "multiplayer_c/adaptation_helper.dll",
+    "multiplayer_c/bass.dll",
+    "multiplayer_c/eax.dll",
+    "multiplayer_c/ogg.dll",
+    "multiplayer_c/vorbis.dll",
+    "multiplayer_c/vorbisFile.dll",
+    "vorbis.dll",
+    "vorbisFile.dll",
+    "vorbisHooked.dll",
+    "data/handling.cfg",
+    "models/gta3.img",
+    "models/gamemod.img",
+    "text/american.gxt",
+)
+CLIENT_PE_FILES = (
+    "gta_sa.exe",
+    "cleo.asi",
+    "eax.dll",
+    "GTAINTERFACE.dll",
+    "LibMP.dll",
+    "ogg.dll",
+    "multiplayer_c/multiplayer_browser_cr.exe",
+    "multiplayer_c/grand_theft_auto_san_andreas.dll",
+    "multiplayer_c/san_andreas_multiplayer.dll",
+    "multiplayer_c/adapt.dll",
+    "multiplayer_c/adaptation_helper.dll",
+    "multiplayer_c/bass.dll",
+    "multiplayer_c/eax.dll",
+    "multiplayer_c/ogg.dll",
+    "multiplayer_c/vorbis.dll",
+    "multiplayer_c/vorbisFile.dll",
+    "vorbis.dll",
+    "vorbisFile.dll",
+    "vorbisHooked.dll",
+)
+CLIENT_FULL_SCAN_INTERVAL_SECONDS = 7 * 24 * 60 * 60
+ENB_DISABLED_BACKUP = "d3d9.dll.lederg-disabled.bak"
 
 BG = "#000000"
 BG_SOFT = "#050505"
@@ -72,6 +137,420 @@ HTTP.headers.update({
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
     )
 })
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _x86_pe_error(path: Path) -> str | None:
+    """Check DOS/PE signatures and the expected 32-bit x86 machine type."""
+    try:
+        with path.open("rb") as stream:
+            dos = stream.read(64)
+            if len(dos) < 64 or dos[:2] != b"MZ":
+                return "отсутствует заголовок MZ"
+            pe_offset = int.from_bytes(dos[0x3C:0x40], "little")
+            if pe_offset < 64 or pe_offset > path.stat().st_size - 6:
+                return "неверный указатель на PE-заголовок"
+            stream.seek(pe_offset)
+            pe = stream.read(6)
+        if len(pe) != 6 or pe[:4] != b"PE\0\0":
+            return "неверная сигнатура PE"
+        machine = int.from_bytes(pe[4:6], "little")
+        if machine != 0x014C:
+            return f"ожидается x86 (0x014C), обнаружен machine=0x{machine:04X}"
+        return None
+    except OSError as exc:
+        return f"не удалось прочитать PE-заголовок: {exc}"
+
+
+def write_client_integrity_manifest(
+    install_root: Path,
+    entries: list[dict],
+    *,
+    source: str = "google-drive-archive",
+    last_full_scan_at: float | None = None,
+) -> Path:
+    """Persist hashes for files verified while extracting the downloaded client archive."""
+    root = Path(install_root).resolve()
+    normalized = []
+    seen: set[str] = set()
+    for item in entries:
+        raw = str(item.get("path") or "").replace("\\", "/")
+        relative = PurePosixPath(raw)
+        if (
+            not raw
+            or relative.is_absolute()
+            or raw.startswith("/")
+            or any(part in ("", ".", "..") for part in relative.parts)
+            or ":" in relative.parts[0]
+            or "\x00" in raw
+        ):
+            raise ValueError(f"Unsafe client integrity path: {raw!r}")
+        key = relative.as_posix().casefold()
+        if key in seen:
+            raise ValueError(f"Duplicate path in client integrity manifest: {raw}")
+        seen.add(key)
+        expected_size = int(item.get("size", -1))
+        digest = str(item.get("sha256") or "").lower()
+        if expected_size < 0 or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"Invalid integrity size or SHA-256 for {raw}")
+        target = root.joinpath(*relative.parts)
+        try:
+            target.resolve().relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"Integrity path escapes client root: {raw}") from exc
+        if target.is_symlink() or not target.is_file():
+            raise RuntimeError(f"Integrity file is missing or unsafe: {raw}")
+        info = target.stat()
+        if info.st_size != expected_size:
+            raise RuntimeError(f"Integrity size mismatch immediately after install: {raw}")
+        normalized.append({
+            "path": relative.as_posix(),
+            "size": expected_size,
+            "sha256": digest,
+            "crc32": str(item.get("crc32") or "").lower(),
+            "mtime_ns": info.st_mtime_ns,
+        })
+    if not normalized:
+        raise RuntimeError("Archive extraction did not produce an integrity inventory.")
+    normalized.sort(key=lambda item: item["path"].casefold())
+    payload = {
+        "schema": 1,
+        "source": str(source),
+        "created_at": int(time.time()),
+        "last_full_scan_at": int(last_full_scan_at if last_full_scan_at is not None else time.time()),
+        "files": normalized,
+    }
+    destination = root / CLIENT_INTEGRITY_FILENAME
+    temporary = destination.with_name(destination.name + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, destination)
+    return destination
+
+
+def finalize_client_integrity_manifest(
+    install_root: Path, extraction_root: Path, inventory_path: Path
+) -> Path:
+    """Rebase ZIP inventory paths from extraction destination to the discovered game root."""
+    root = Path(install_root).resolve()
+    base = Path(extraction_root).resolve()
+    inventory = json.loads(Path(inventory_path).read_text(encoding="utf-8"))
+    if not isinstance(inventory, dict) or inventory.get("schema") != 1:
+        raise ValueError("Invalid temporary client integrity inventory.")
+    raw_entries = inventory.get("files")
+    if not isinstance(raw_entries, list):
+        raise ValueError("Client integrity inventory has no file list.")
+    entries = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("path") or "").replace("\\", "/")
+        relative = PurePosixPath(raw)
+        if not raw or relative.is_absolute() or any(part in ("", ".", "..") for part in relative.parts):
+            raise ValueError(f"Unsafe path in extracted inventory: {raw!r}")
+        extracted = base.joinpath(*relative.parts)
+        try:
+            extracted_resolved = extracted.resolve()
+            rebased = extracted_resolved.relative_to(root)
+        except (OSError, ValueError):
+            # ZIPs may contain companion files beside the game root; they aren't
+            # managed by the client-root integrity manifest.
+            continue
+        if extracted.is_symlink() or not extracted.is_file():
+            continue
+        entries.append({
+            "path": rebased.as_posix(),
+            "size": int(item.get("size", -1)),
+            "sha256": str(item.get("sha256") or ""),
+            "crc32": str(item.get("crc32") or ""),
+        })
+    if not entries:
+        raise RuntimeError("No extracted archive files were found inside the game root.")
+    return write_client_integrity_manifest(root, entries, source="google-drive-archive")
+
+
+def inspect_client_installation(
+    install_root: Path,
+    *,
+    full_scan: bool = False,
+    progress_callback=None,
+) -> dict:
+    """Validate the CR:MP folder layout, PE architecture, and installed-file hashes."""
+    root = Path(install_root).resolve()
+    issues: list[str] = []
+    warnings: list[str] = []
+    missing_files: list[str] = []
+    checked_files = 0
+    integrity_mode = "structural-only"
+    inventory_path = root / CLIENT_INTEGRITY_FILENAME
+
+    if not root.is_dir():
+        issues.append(f"Не найдена папка клиента: {root}")
+    else:
+        for relative in CLIENT_REQUIRED_DIRECTORIES:
+            if not (root / relative).is_dir():
+                issues.append(f"Отсутствует папка клиента: {relative}")
+        for relative in CLIENT_REQUIRED_FILES:
+            target = root / relative
+            if not target.is_file():
+                missing_files.append(relative)
+                issues.append(f"Отсутствует обязательный файл: {relative}")
+                continue
+            try:
+                if target.stat().st_size <= 0:
+                    missing_files.append(relative)
+                    issues.append(f"Обязательный файл пустой: {relative}")
+            except OSError as exc:
+                missing_files.append(relative)
+                issues.append(f"Не удалось проверить файл {relative}: {exc}")
+        for relative in CLIENT_PE_FILES:
+            target = root / relative
+            if target.is_file():
+                pe_error = _x86_pe_error(target)
+                if pe_error:
+                    issues.append(f"Повреждён или не подходит бинарный файл {relative}: {pe_error}")
+
+        if (root / "d3d9.dll").is_file() and (root / "enbseries.ini").is_file():
+            warnings.append(
+                "Найдена локальная графическая обёртка ENB (d3d9.dll); "
+                "она будет отключена только если Windows подтвердит её связь со сбоем."
+            )
+
+        if inventory_path.is_file():
+            try:
+                payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict) or payload.get("schema") != 1:
+                    raise ValueError("unsupported schema")
+                entries = payload.get("files")
+                if not isinstance(entries, list) or not entries:
+                    raise ValueError("empty file inventory")
+                if len(entries) > 250000:
+                    raise ValueError("file inventory is too large")
+                last_scan = float(payload.get("last_full_scan_at") or 0)
+                if not full_scan and time.time() - last_scan >= CLIENT_FULL_SCAN_INTERVAL_SECONDS:
+                    full_scan = True
+                total_bytes = sum(max(0, int(entry.get("size", 0))) for entry in entries if isinstance(entry, dict))
+                processed_bytes = 0
+                seen: set[str] = set()
+                changed_manifest = False
+                critical_paths = {name.casefold() for name in CLIENT_PE_FILES}
+                integrity_mode = "full" if full_scan else "fast"
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        issues.append("Некорректная запись контрольной суммы клиента")
+                        continue
+                    raw = str(entry.get("path") or "").replace("\\", "/")
+                    relative = PurePosixPath(raw)
+                    if (
+                        not raw
+                        or relative.is_absolute()
+                        or raw.startswith("/")
+                        or any(part in ("", ".", "..") for part in relative.parts)
+                        or ":" in relative.parts[0]
+                        or "\x00" in raw
+                    ):
+                        issues.append(f"Небезопасный путь в манифесте клиента: {raw!r}")
+                        continue
+                    key = relative.as_posix().casefold()
+                    if key in seen:
+                        issues.append(f"Повтор пути в манифесте клиента: {raw}")
+                        continue
+                    seen.add(key)
+                    expected_size = int(entry.get("size", -1))
+                    expected_hash = str(entry.get("sha256") or "").lower()
+                    if expected_size < 0 or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+                        issues.append(f"Некорректная контрольная сумма: {raw}")
+                        continue
+                    if (
+                        key == "d3d9.dll"
+                        and (root / ENB_DISABLED_BACKUP).is_file()
+                    ):
+                        processed_bytes += expected_size
+                        continue
+                    target = root.joinpath(*relative.parts)
+                    try:
+                        target.resolve().relative_to(root)
+                    except ValueError:
+                        issues.append(f"Путь файла вышел за пределы клиента: {raw}")
+                        continue
+                    try:
+                        info = target.stat()
+                    except OSError:
+                        issues.append(f"Пропал установленный файл: {raw}")
+                        processed_bytes += expected_size
+                        if progress_callback:
+                            progress_callback(processed_bytes, total_bytes, raw)
+                        continue
+                    if not target.is_file() or target.is_symlink():
+                        issues.append(f"Ожидался обычный файл: {raw}")
+                        processed_bytes += expected_size
+                        if progress_callback:
+                            progress_callback(processed_bytes, total_bytes, raw)
+                        continue
+                    if info.st_size != expected_size:
+                        issues.append(
+                            f"Размер установленного файла изменился: {raw} "
+                            f"({info.st_size} вместо {expected_size} байт)"
+                        )
+                        processed_bytes += expected_size
+                        if progress_callback:
+                            progress_callback(processed_bytes, total_bytes, raw)
+                        continue
+                    old_mtime = int(entry.get("mtime_ns", -1))
+                    must_hash = full_scan or info.st_mtime_ns != old_mtime or key in critical_paths
+                    if must_hash:
+                        actual_hash = _sha256_file(target)
+                        checked_files += 1
+                        if actual_hash != expected_hash:
+                            issues.append(f"Не совпала SHA-256 контрольная сумма: {raw}")
+                        elif info.st_mtime_ns != old_mtime:
+                            entry["mtime_ns"] = info.st_mtime_ns
+                            changed_manifest = True
+                    processed_bytes += expected_size
+                    if progress_callback:
+                        progress_callback(processed_bytes, total_bytes, raw)
+                if full_scan and not issues:
+                    payload["last_full_scan_at"] = int(time.time())
+                    changed_manifest = True
+                if changed_manifest and not issues:
+                    temporary = inventory_path.with_name(inventory_path.name + ".tmp")
+                    temporary.write_text(
+                        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
+                    )
+                    os.replace(temporary, inventory_path)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                issues.append(f"Не удалось проверить контрольные суммы клиента: {exc}")
+        else:
+            warnings.append(
+                "Для этой старой установки нет эталонного манифеста; "
+                "проверены обязательные файлы и их PE-заголовки."
+            )
+
+    healthy = not issues
+    if healthy:
+        summary = (
+            f"Проверены обязательные компоненты и структура клиента; "
+            f"проверок SHA-256: {checked_files} ({integrity_mode})."
+        )
+    else:
+        summary = f"Найдены проблемы клиента: {len(issues)}."
+    return {
+        "healthy": healthy,
+        "root": str(root),
+        "issues": issues,
+        "warnings": warnings,
+        "missing_files": missing_files,
+        "checked_files": checked_files,
+        "integrity_mode": integrity_mode,
+        "summary": summary,
+    }
+
+
+
+def select_client_crash_events(
+    events: str | list[str] | tuple[str, ...], install_root: Path
+) -> list[str]:
+    """Keep recent access-violation events whose Windows paths point inside this install."""
+    texts = [events] if isinstance(events, str) else list(events or [])
+    root = os.path.normcase(os.path.abspath(os.fspath(install_root))).replace("/", "\\").rstrip("\\")
+    if not root:
+        return []
+    root_folded = root.casefold()
+    selected = []
+    for event in texts:
+        raw = str(event or "")
+        folded = raw.replace("/", "\\").casefold()
+        if "0xc0000005" not in folded:
+            continue
+        # Require a path boundary so C:\Games\CR does not match C:\Games\CR-Old.
+        if root_folded + "\\" not in folded:
+            continue
+        selected.append(raw)
+    return selected[:10]
+
+
+def extract_faulting_module_path(
+    events: str | list[str] | tuple[str, ...]
+) -> str | None:
+    """Parse the full path of the faulting module, if Windows included it."""
+    texts = [events] if isinstance(events, str) else list(events or [])
+    for event in texts:
+        text = str(event or "")
+        for pattern in (
+            r"Faulting module path:\s*([^\r\n]+)",
+            r"Путь сбойного модуля:\s*([^\r\n]+)",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip().strip('"')
+                return value or None
+    return None
+
+
+def extract_faulting_module(events: str | list[str] | tuple[str, ...]) -> str | None:
+    """Parse the faulting-module name from a Windows Application Error event."""
+    texts = [events] if isinstance(events, str) else list(events or [])
+    for event in texts:
+        text = str(event or "")
+        for pattern in (
+            r"Faulting module name:\s*([^,\r\n]+)",
+            r"Имя сбойного модуля:\s*([^,\r\n]+)",
+        ):
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip().strip('"')
+                return Path(name.replace("\\", "/")).name.casefold() or None
+    module_path = extract_faulting_module_path(texts)
+    if module_path:
+        return Path(module_path.replace("\\", "/")).name.casefold() or None
+    return None
+
+
+def quarantine_faulting_optional_module(
+    install_root: Path, module_name: str, module_path: str | None = None
+) -> Path | None:
+    """Reversibly disable ENB only when the crash report points to this local proxy."""
+    root = Path(install_root).resolve()
+    if Path(str(module_name or "").replace("\\", "/")).name.casefold() != "d3d9.dll":
+        return None
+    if not module_path:
+        return None
+    reported_path = Path(str(module_path).strip().strip('"').replace("\\", "/"))
+    try:
+        reported_resolved = reported_path.resolve()
+        expected_resolved = (root / "d3d9.dll").resolve()
+    except OSError:
+        return None
+    if os.path.normcase(str(reported_resolved)) != os.path.normcase(str(expected_resolved)):
+        return None
+    if not (root / "enbseries.ini").is_file():
+        return None
+    if not (root / "ENBSeries_License.txt").is_file():
+        return None
+    proxy = root / "d3d9.dll"
+    backup = root / ENB_DISABLED_BACKUP
+    if not proxy.is_file() or proxy.is_symlink():
+        return None
+    if backup.exists():
+        suffix = 1
+        while True:
+            candidate = root / f"d3d9.dll.lederg-disabled-{suffix}.bak"
+            if not candidate.exists():
+                backup = candidate
+                break
+            suffix += 1
+    try:
+        proxy.replace(backup)
+        return backup
+    except OSError:
+        return None
 
 
 def sanitize_nickname(value: str) -> str:
@@ -113,6 +592,151 @@ def parse_server_address(value: str) -> tuple[str, int]:
         ):
             raise ValueError("Указан некорректный IP-адрес или доменное имя.")
     return host, port
+
+
+def build_samp_query_packet(
+    ip: str, port: int, *, opcode: str, challenge: bytes = b""
+) -> bytes:
+    """Build a SA:MP UDP query header for an IPv4 server endpoint."""
+    parsed_ip = ipaddress.ip_address(str(ip).strip())
+    if parsed_ip.version != 4:
+        raise ValueError("SA:MP server queries require an IPv4 endpoint.")
+    port = int(port)
+    if not 1 <= port <= 65535:
+        raise ValueError("Server port must be between 1 and 65535.")
+    if not isinstance(opcode, str) or len(opcode) != 1 or not opcode.isascii():
+        raise ValueError("SA:MP query opcode must be one ASCII character.")
+    if opcode == "p" and len(challenge) != 4:
+        raise ValueError("SA:MP ping queries require a four-byte challenge.")
+    if opcode != "p" and challenge:
+        raise ValueError("Only ping queries can carry a challenge.")
+    return (
+        b"SAMP"
+        + parsed_ip.packed
+        + port.to_bytes(2, "little")
+        + opcode.encode("ascii")
+        + challenge
+    )
+
+
+def query_samp_server(
+    host: str,
+    port: int,
+    *,
+    timeout: float = 0.8,
+    challenge: bytes | None = None,
+) -> dict:
+    """Query a SA:MP server with protocol packets and return online state plus RTT.
+
+    A valid SA:MP ping echo is preferred. If ping queries are disabled, a correctly
+    framed information-query reply is accepted as proof that the query endpoint responds.
+    A plain UDP send is never treated as proof of an online server.
+    """
+    try:
+        port = int(port)
+        if not 1 <= port <= 65535:
+            raise ValueError("Некорректный порт сервера.")
+        records = socket.getaddrinfo(
+            str(host).strip(), port, family=socket.AF_INET, type=socket.SOCK_DGRAM
+        )
+        if not records:
+            raise OSError("Не удалось разрешить IPv4-адрес сервера.")
+        ip = str(records[0][4][0])
+        token = os.urandom(4) if challenge is None else bytes(challenge)
+        if len(token) != 4:
+            raise ValueError("Ping challenge must be exactly four bytes.")
+        ping_packet = build_samp_query_packet(ip, port, opcode="p", challenge=token)
+        info_packet = build_samp_query_packet(ip, port, opcode="i")
+    except (OSError, ValueError, TypeError) as exc:
+        return {
+            "online": False,
+            "ping_ms": None,
+            "method": "none",
+            "detail": f"Ошибка адреса сервера: {exc}",
+        }
+
+    udp = None
+    try:
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.settimeout(max(0.05, min(float(timeout), 5.0)))
+        endpoint = (ip, port)
+
+        ping_started = time.perf_counter()
+        udp.sendto(ping_packet, endpoint)
+        try:
+            response, peer = udp.recvfrom(2048)
+        except socket.timeout:
+            response, peer = b"", None
+        ping_elapsed = max(0, round((time.perf_counter() - ping_started) * 1000))
+
+        if (
+            peer is not None
+            and peer[0] == ip
+            and peer[1] == port
+            and response[:11] == ping_packet[:11]
+            and response[11:15] == token
+            and len(response) >= 15
+        ):
+            return {
+                "online": True,
+                "ping_ms": ping_elapsed,
+                "method": "ping",
+                "detail": "Ответ на SA:MP ping",
+            }
+
+        info_started = time.perf_counter()
+        udp.sendto(info_packet, endpoint)
+        try:
+            response, peer = udp.recvfrom(4096)
+        except socket.timeout:
+            response, peer = b"", None
+        info_elapsed = max(0, round((time.perf_counter() - info_started) * 1000))
+        if (
+            peer is not None
+            and peer[0] == ip
+            and peer[1] == port
+            and response[:11] == info_packet[:11]
+            and len(response) > 11
+        ):
+            return {
+                "online": True,
+                "ping_ms": info_elapsed,
+                "method": "info",
+                "detail": "Ответ на SA:MP info",
+            }
+        return {
+            "online": False,
+            "ping_ms": None,
+            "method": "none",
+            "detail": "Нет ответа на SA:MP query",
+        }
+    except (OSError, ValueError, TypeError) as exc:
+        return {
+            "online": False,
+            "ping_ms": None,
+            "method": "none",
+            "detail": f"Ошибка UDP-запроса: {exc}",
+        }
+    finally:
+        if udp is not None:
+            try:
+                udp.close()
+            except OSError:
+                pass
+
+
+def format_client_exit_code(code: int) -> str:
+    """Translate common Windows process failure codes into actionable diagnostics."""
+    unsigned = int(code) & 0xFFFFFFFF
+    if unsigned == 0xC0000005:
+        return (
+            f"CR:MP завершился с кодом {int(code)} (0x{unsigned:08X}: "
+            "ACCESS_VIOLATION — нарушение доступа к памяти). Это сбой игрового "
+            "клиента или одной из его DLL; сам код не указывает виновный файл. "
+            "Нажми «Переустановить» для восстановления файлов. Если повторится, "
+            "нужен журнал Windows «Приложение» с именем сбойного модуля."
+        )
+    return f"Клиент завершился с кодом {code} (0x{unsigned:08X})."
 
 
 def load_server_address(cache_path: Path, fetcher=None) -> tuple[str, int]:
@@ -158,14 +782,9 @@ def fetch_release_manifest(fetcher=None) -> dict:
         raise ValueError("URL архива должен использовать HTTP или HTTPS.")
     elif parsed.scheme.lower() == "http" and not (parsed.hostname or "").lower().endswith(".cloudpub.ru"):
         raise ValueError("Незашифрованный HTTP разрешён только для домена Cloudpub.")
-    # Large Google Drive archives can trigger a virus-scan confirmation page.
-    # Carry the same confirmation query on each HEAD/GET so we receive the ZIP,
-    # not a small HTML warning document.
-    parsed = urlparse(archive_url)
-    if (parsed.hostname or "").lower() in {"drive.google.com", "drive.usercontent.google.com"}:
-        query = parse_qs(parsed.query, keep_blank_values=True)
-        if not query.get("confirm"):
-            archive_url += ("&" if parsed.query else "?") + "confirm=t"
+    if not files_manifest_url:
+        # Keep older client.json files compatible with the current manifest-first updater.
+        files_manifest_url = CLIENT_FILES_MANIFEST_URL
     if files_manifest_url:
         files_parsed = urlparse(files_manifest_url)
         if not files_parsed.scheme:
@@ -192,15 +811,17 @@ def fetch_release_manifest(fetcher=None) -> dict:
     manifest_mode = str(payload.get("launch_mode", DEFAULT_LAUNCH_MODE)).strip().lower()
     if manifest_mode not in {"direct", "samp-cli", "browser", "browser-ui"}:
         raise ValueError("Неизвестный launch_mode в манифесте.")
-    # This launcher build uses the tested command-line path. A stale public
-    # manifest must not switch it back to the graphical server browser.
+    # A stale public manifest must not switch the client back to browser-driven launch.
+    # Keep archive metadata as a compatibility fallback; prefer the per-file manifest.
     mode = DEFAULT_LAUNCH_MODE
     payload.update({
         "version": version,
-        "archive_url": archive_url,
+        # Keep the archive fallback pinned to the known Drive client; its metadata
+        # must not be inherited from an arbitrary/old public manifest.
+        "archive_url": DRIVE_DOWNLOAD_URL,
         "files_manifest_url": files_manifest_url,
-        "archive_size": size,
-        "sha256": digest,
+        "archive_size": 0,
+        "sha256": "",
         "client_executable": executable.replace("\\", "/"),
         "launch_mode": mode,
     })
@@ -333,18 +954,11 @@ def build_launch_command(
     nickname: str = "Player",
     launch_mode: str = DEFAULT_LAUNCH_MODE,
 ) -> list[str]:
-    """Build CR:MP bootstrap arguments without accidentally setting a server password.
-
-    The Criminal Russia bootstrap reads PlayerName from HKCU\\Software\\SAMP.
-    Unlike a generic SA-MP command helper, this bootstrap interprets trailing
-    command-line switches in a way that can leave an orphaned "-z -n" pair
-    when "-n nickname" is appended here. The client then treats "-n" as the
-    server password and rejects a passwordless server. Only pass host:port;
-    the caller registers the nickname in the registry before launching.
-    """
+    """Build the client launch contract; the actual game client owns the UDP socket."""
     if launch_mode in {"browser", "browser-ui"}:
         return [str(executable)]
-    return [str(executable), f"{host}:{int(port)}"]
+    nick = sanitize_nickname(nickname)
+    return [str(executable), f"{host}:{int(port)}", "-n", nick]
 
 
 
@@ -387,6 +1001,24 @@ def build_direct_launcher_command(
         "--nickname", nick,
     ]
 
+
+
+def spawn_direct_launcher(command: list[str], game_root: Path) -> subprocess.Popen:
+    """Run the bundled direct-connect helper with no visible console window."""
+    options = {
+        "cwd": str(Path(game_root).resolve()),
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        startup_info = subprocess.STARTUPINFO()
+        startup_info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup_info.wShowWindow = subprocess.SW_HIDE
+        options["startupinfo"] = startup_info
+        options["creationflags"] = subprocess.CREATE_NO_WINDOW
+    return subprocess.Popen(command, **options)
 
 
 def find_direct_game_client(root: Path) -> Path | None:
@@ -450,133 +1082,37 @@ def write_launcher_log(message: str) -> None:
         pass
 
 
-def samp_registry_values(game_root: Path, nickname: str = "LEDERG") -> dict[str, str]:
-    """Build the SA-MP-compatible registry values used by Multiplayer adaptation."""
-    root = Path(game_root).resolve()
-    game = root / "gta_sa.exe"
-    if not game.is_file():
-        raise FileNotFoundError(f"Не найден файл игры: {game}")
-    return {
-        "gta_sa_exe": str(game),
-        "PlayerName": sanitize_nickname(nickname),
-    }
-
-
-def register_samp_game(game_root: Path, nickname: str = "LEDERG") -> dict[str, str]:
-    """Register the exact game executable so adaptation.dll can determine game type."""
-    values = samp_registry_values(game_root, nickname)
-    try:
-        import winreg
-    except ImportError as exc:
-        raise OSError("Регистрация пути игры поддерживается только в Windows.") from exc
-    with winreg.CreateKeyEx(
-        winreg.HKEY_CURRENT_USER,
-        r"Software\\SAMP",
-        0,
-        winreg.KEY_SET_VALUE,
-    ) as key:
-        for name, value in values.items():
-            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-    write_launcher_log(
-        f"Registered SA-MP game path: gta_sa_exe={values['gta_sa_exe']}; "
-        f"PlayerName={values['PlayerName']}."
-    )
-    return values
-
-
-def ensure_legacy_directx_dependency(
-    game_root: Path,
-    *,
-    bundle_root: Path | None = None,
-) -> Path:
-    """Install only the verified x86 D3DX9 dependency required by the shipped client."""
-    root = Path(game_root).resolve()
-    destination = root / LEGACY_D3DX_DLL_NAME
-
-    def digest(path: Path) -> str:
-        hasher = hashlib.sha256()
-        with path.open("rb") as stream:
-            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    # D3DX9 belongs beside gta_sa.exe. Older launcher builds incorrectly copied
-    # it into multiplayer_c too, where the client rejects it as an extra file.
-    # Preserve that old copy outside the installation before removing it.
-    extra_copy = root / "multiplayer_c" / LEGACY_D3DX_DLL_NAME
-    if extra_copy.is_file() or extra_copy.is_symlink():
-        quarantine = Path(
-            os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
-        ) / "LEDERG CRMP" / "quarantine"
-        try:
-            quarantine.mkdir(parents=True, exist_ok=True)
-            backup = quarantine / f"{LEGACY_D3DX_DLL_NAME}.{time.time_ns()}.backup"
-            shutil.move(str(extra_copy), str(backup))
-            write_launcher_log(
-                f"Removed extra client DLL from protected multiplayer_c folder; "
-                f"preserved backup at {backup}."
-            )
-        except OSError as exc:
-            raise OSError(
-                f"Не удалось убрать лишний файл {extra_copy}. "
-                "Закрой игру и проверь права на папку клиента."
-            ) from exc
-
-    if destination.is_file() and digest(destination) == LEGACY_D3DX_SHA256:
-        return destination
-
-    if bundle_root is None:
-        bundle_root = Path(
-            getattr(sys, "_MEIPASS", Path(__file__).resolve().parent)
-        )
-    source = Path(bundle_root) / "dependencies" / LEGACY_D3DX_DLL_NAME
-    if not source.is_file():
-        raise FileNotFoundError(
-            f"Не найдена обязательная библиотека {LEGACY_D3DX_DLL_NAME}. "
-            f"Переустанови актуальный LEDERG CR:MP. "
-            f"Официальный пакет Microsoft DirectX: {DIRECTX_LEGACY_RUNTIME_URL}"
-        )
-    if digest(source) != LEGACY_D3DX_SHA256:
+def connect_via_browser_ui(
+    executable: Path, host: str, port: int, nickname: str = "LEDERG"
+) -> subprocess.Popen:
+    """Open the official CR:MP browser and connect through its server UI."""
+    host_text = str(host or "").strip()
+    if ":" in host_text and not host_text.startswith("["):
+        host_text = f"[{host_text}]"
+    endpoint_host, endpoint_port = parse_server_address(f"{host_text}:{int(port)}")
+    if executable.name.casefold() != "multiplayer_browser_cr.exe":
         raise ValueError(
-            f"Проверка SHA-256 библиотеки {LEGACY_D3DX_DLL_NAME} не пройдена; "
-            "файл не будет скопирован."
+            "Для запуска через браузер нужен multiplayer_c/multiplayer_browser_cr.exe."
         )
-
-    root.mkdir(parents=True, exist_ok=True)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    handle, temp_name = tempfile.mkstemp(
-        prefix=".lederg-d3dx-", suffix=".tmp", dir=str(destination.parent)
-    )
-    os.close(handle)
-    temporary = Path(temp_name)
-    try:
-        shutil.copyfile(source, temporary)
-        if digest(temporary) != LEGACY_D3DX_SHA256:
-            raise ValueError("Контрольная сумма D3DX9 изменилась при копировании.")
-        os.replace(temporary, destination)
-    finally:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-    write_launcher_log(
-        f"Installed verified legacy DirectX dependency: {destination}; SHA-256={LEGACY_D3DX_SHA256}."
-    )
-    return destination
-
-def connect_via_browser_ui(executable: Path, host: str, port: int, nickname: str = "LEDERG") -> subprocess.Popen:
-    """Launch the legacy CR:MP browser and drive its native server/connect dialogs."""
+    game_root = game_root_for(executable)
     if os.name != "nt":
-        return subprocess.Popen([str(executable)], cwd=str(game_root_for(executable)))
+        # Keeps discovery/unit tests portable; real UI automation is Windows-only.
+        return subprocess.Popen([str(executable)], cwd=str(game_root))
+
     user32 = ctypes.windll.user32
     EnumProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
 
     class RECT(ctypes.Structure):
-        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
-                    ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long),
+        ]
 
     def windows(pid: int):
         found = []
+
         def callback(hwnd, _):
             process_id = ctypes.c_ulong()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
@@ -588,6 +1124,7 @@ def connect_via_browser_ui(executable: Path, host: str, port: int, nickname: str
                 user32.GetWindowRect(hwnd, ctypes.byref(rect))
                 found.append((hwnd, buf.value, bool(user32.IsWindowVisible(hwnd)), rect))
             return True
+
         user32.EnumWindows(EnumProc(callback), 0)
         return found
 
@@ -604,16 +1141,21 @@ def connect_via_browser_ui(executable: Path, host: str, port: int, nickname: str
         user32.GetWindowRect(hwnd, ctypes.byref(rect))
         click(rect.left + x, rect.top + y, double)
 
-    def find_window(pid, needle, visible=True):
+    def find_window(pid: int, needles, visible=True):
+        if isinstance(needles, str):
+            needles = (needles,)
+        needles = tuple(str(value).casefold() for value in needles)
         for hwnd, title, shown, rect in windows(pid):
-            if needle.lower() in title.lower() and (visible is None or shown == visible):
+            if any(needle in title.casefold() for needle in needles) and (
+                visible is None or shown == visible
+            ):
                 return hwnd, title, rect
         return None
 
-    def wait_window(pid, needle, timeout=4):
+    def wait_window(pid: int, needles, timeout=4):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            item = find_window(pid, needle, True)
+            item = find_window(pid, needles, True)
             if item:
                 return item
             time.sleep(.15)
@@ -621,76 +1163,188 @@ def connect_via_browser_ui(executable: Path, host: str, port: int, nickname: str
 
     def type_text(value):
         KEYEVENTF_UNICODE, KEYEVENTF_KEYUP = 0x0004, 0x0002
+
         class KEYBDINPUT(ctypes.Structure):
-            _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
-                        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
-                        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong))]
+            _fields_ = [
+                ("wVk", ctypes.c_ushort),
+                ("wScan", ctypes.c_ushort),
+                ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong),
+                ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+            ]
+
         class INPUTUNION(ctypes.Union):
             _fields_ = [("ki", KEYBDINPUT)]
+
         class INPUT(ctypes.Structure):
             _fields_ = [("type", ctypes.c_ulong), ("u", INPUTUNION)]
+
         for char in value:
-            event = INPUT(1, INPUTUNION(KEYBDINPUT(0, ord(char), KEYEVENTF_UNICODE, 0, None)))
+            event = INPUT(
+                1,
+                INPUTUNION(KEYBDINPUT(0, ord(char), KEYEVENTF_UNICODE, 0, None)),
+            )
             user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(INPUT))
             event.u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
             user32.SendInput(1, ctypes.byref(event), ctypes.sizeof(INPUT))
 
-    def press_enter():
-        user32.keybd_event(0x0D, 0, 0, 0)
+    def press_key(key):
+        user32.keybd_event(key, 0, 0, 0)
         time.sleep(.04)
-        user32.keybd_event(0x0D, 0, 2, 0)
+        user32.keybd_event(key, 0, 2, 0)
 
-    process = subprocess.Popen([str(executable)], cwd=str(game_root_for(executable)),
-                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL, close_fds=True)
-    browser = wait_window(process.pid, "Criminal Russia Multiplayer", 15)
-    if not browser:
-        raise RuntimeError("CR:MP browser window did not appear.")
-    hwnd = browser[0]
-    user32.SetForegroundWindow(hwnd)
-    time.sleep(.5)
+    def press_enter():
+        press_key(0x0D)
 
-    # Toolbar: Add Server; the edit field in the native dialog is focused by default.
-    click_relative(hwnd, 49, 64)
-    add_dialog = wait_window(process.pid, "Добавление сервера", 3)
-    if add_dialog:
+    def replace_focused_text(value):
+        # Ctrl+A avoids appending to an old address or nickname left in the edit box.
+        user32.keybd_event(0x11, 0, 0, 0)
+        user32.keybd_event(0x41, 0, 0, 0)
+        time.sleep(.04)
+        user32.keybd_event(0x41, 0, 2, 0)
+        user32.keybd_event(0x11, 0, 2, 0)
+        time.sleep(.05)
+        type_text(value)
+
+    process = subprocess.Popen(
+        [str(executable)],
+        cwd=str(game_root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    write_launcher_log(
+        f"CR:MP browser launch requested: executable={executable}; cwd={game_root}; "
+        f"endpoint={endpoint_host}:{endpoint_port}; nickname={nickname}"
+    )
+    try:
+        browser = wait_window(
+            process.pid,
+            ("Criminal Russia Multiplayer", "Criminal Russia MP"),
+            15,
+        )
+        if not browser:
+            raise RuntimeError(
+                "Запустил multiplayer_browser_cr.exe, но окно браузера CR:MP не появилось. "
+                "Проверь файлы в multiplayer_c и открой «ЖУРНАЛ»."
+            )
+        hwnd = browser[0]
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(.5)
+
+        # The client's toolbar contains Add Server. Dialog titles differ between languages.
+        click_relative(hwnd, 49, 64)
+        add_dialog = wait_window(
+            process.pid,
+            ("Добавление сервера", "Добавить сервер", "Add Server", "Add a Server"),
+            4,
+        )
+        if not add_dialog:
+            raise RuntimeError(
+                "Браузер открыт, но окно добавления сервера не найдено. "
+                "Если интерфейс клиента отличается, открой «ЖУРНАЛ» для диагностики."
+            )
         user32.SetForegroundWindow(add_dialog[0])
-        type_text(f"{host}:{port}")
+        replace_focused_text(f"{endpoint_host}:{endpoint_port}")
         press_enter()
-        time.sleep(2)
+        time.sleep(1.5)
 
-    # Select the first row and open its properties, then click Connect.
-    click_relative(hwnd, 180, 106, double=True)
-    props = wait_window(process.pid, "Свойства сервера", 3)
-    if props:
+        # This client archive starts with an empty server list. The just-added endpoint
+        # is therefore the first row; double-click it to open its properties.
+        click_relative(hwnd, 180, 106, double=True)
+        props = wait_window(
+            process.pid,
+            ("Свойства сервера", "Server Properties", "Server properties"),
+            4,
+        )
+        if not props:
+            raise RuntimeError(
+                f"Адрес {endpoint_host}:{endpoint_port} добавлен в браузер, но окно "
+                "свойств сервера не открылось. Проверь окно CR:MP и журнал лаунчера."
+            )
         user32.SetForegroundWindow(props[0])
         click_relative(props[0], 62, 205)
-        nick_dialog = wait_window(process.pid, "Кто вы", 2)
+
+        nick_dialog = wait_window(
+            process.pid,
+            ("Кто вы", "Who are you", "Enter your nickname", "Nickname"),
+            3,
+        )
         if nick_dialog:
             user32.SetForegroundWindow(nick_dialog[0])
             click_relative(nick_dialog[0], 140, 67)
-            type_text(re.sub(r"[^A-Za-z0-9_]", "", nickname)[:24] or "LEDERG")
+            clean_nickname = re.sub(r"[^A-Za-z0-9_]", "", nickname)[:24] or "LEDERG"
+            replace_focused_text(clean_nickname)
             press_enter()
-            time.sleep(1)
-            # Some client builds require a second click after the nickname is accepted.
-            props_again = wait_window(process.pid, "Свойства сервера", 1)
+            time.sleep(.8)
+            # On some client builds the nickname dialog returns to server properties;
+            # press Connect a second time to finish the handoff.
+            props_again = wait_window(
+                process.pid,
+                ("Свойства сервера", "Server Properties", "Server properties"),
+                1.5,
+            )
             if props_again:
                 user32.SetForegroundWindow(props_again[0])
                 click_relative(props_again[0], 62, 205)
-    return process
+        else:
+            # A saved nickname may skip the prompt, but a still-open properties window
+            # indicates Connect did not proceed.
+            props_again = wait_window(
+                process.pid,
+                ("Свойства сервера", "Server Properties", "Server properties"),
+                1,
+            )
+            if props_again:
+                raise RuntimeError(
+                    "В окне свойств сервера не открылся экран ника/подключения. "
+                    "Проверь раскладку окон клиента и журнал лаунчера."
+                )
+
+        write_launcher_log(
+            f"CR:MP browser UI connection flow submitted for {endpoint_host}:{endpoint_port}; "
+            f"pid={process.pid}"
+        )
+        return process
+    except Exception as exc:
+        write_launcher_log(
+            f"CR:MP browser UI connection failed: endpoint={endpoint_host}:{endpoint_port}; "
+            f"pid={process.pid}; error={exc!r}"
+        )
+        # Avoid leaving an untracked browser hidden behind the launcher when the UI
+        # flow could not reach the server connection stage.
+        if process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        raise
 
 
-def safe_extract_zip(archive: Path, destination: Path, progress=None, cancel=None) -> int:
-    """Extract a ZIP while preventing path traversal, symlinks and unsafe destinations."""
+
+def safe_extract_zip(
+    archive: Path,
+    destination: Path,
+    progress=None,
+    cancel=None,
+    *,
+    integrity_manifest_path: Path | None = None,
+) -> int:
+    """Safely extract ZIP entries and optionally record SHA-256 baselines while streaming."""
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     extracted_files = 0
+    integrity_entries: list[dict] = []
 
     with zipfile.ZipFile(archive, "r") as bundle:
         entries = bundle.infolist()
         total_bytes = sum(entry.file_size for entry in entries if not entry.is_dir())
         free = shutil.disk_usage(destination).free
-        # The archive is already in the destination. Leave a little room for filesystem overhead.
         required = total_bytes + 128 * 1024 * 1024
         if free < required:
             need_gb = required / (1024 ** 3)
@@ -731,7 +1385,7 @@ def safe_extract_zip(archive: Path, destination: Path, progress=None, cancel=Non
                 continue
 
             target.parent.mkdir(parents=True, exist_ok=True)
-            # Stream in chunks: no file is loaded completely into memory.
+            digest = hashlib.sha256() if integrity_manifest_path is not None else None
             with bundle.open(entry, "r") as source, target.open("wb") as output:
                 while True:
                     if cancel is not None and cancel.is_set():
@@ -742,10 +1396,36 @@ def safe_extract_zip(archive: Path, destination: Path, progress=None, cancel=Non
                     if not chunk:
                         break
                     output.write(chunk)
+                    if digest is not None:
+                        digest.update(chunk)
                     completed_bytes += len(chunk)
                     if progress:
                         progress(completed_bytes, total_bytes, entry.filename)
             extracted_files += 1
+            if digest is not None:
+                info = target.stat()
+                integrity_entries.append({
+                    "path": relative.as_posix(),
+                    "size": info.st_size,
+                    "sha256": digest.hexdigest(),
+                    "crc32": f"{int(entry.CRC) & 0xFFFFFFFF:08x}",
+                    "mtime_ns": info.st_mtime_ns,
+                })
+
+    if integrity_manifest_path is not None:
+        integrity_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": 1,
+            "source": "google-drive-archive",
+            "created_at": int(time.time()),
+            "files": integrity_entries,
+        }
+        temporary = integrity_manifest_path.with_name(integrity_manifest_path.name + ".tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        os.replace(temporary, integrity_manifest_path)
 
     return extracted_files
 
@@ -757,298 +1437,140 @@ def _content_range_total(value: str | None) -> int | None:
     return int(match.group(1)) if match else None
 
 
-
-class ParallelRangeUnsupported(RuntimeError):
-    """The server did not honor byte-range requests; sequential download is safe."""
-
-
-def should_use_manifest_update(destination: Path, preferred_executable: str | None = None) -> bool:
-    """Use per-file updates only when a recognizable CR:MP install already exists."""
-    client = find_client(destination, preferred_executable or DEFAULT_CLIENT_EXECUTABLE)
-    if client is None:
-        return False
-    root = game_root_for(client)
-    return (root / "gta_sa.exe").is_file() and bool(find_injected_multiplayer_dll(root))
-
-
-def ensure_install_space(
-    destination: Path,
-    archive_size: int,
-    install_size: int = 0,
-    reserve_bytes: int = 256 * 1024 * 1024,
-) -> int:
-    """Fail before downloading if the ZIP plus expanded client will not fit."""
-    destination.mkdir(parents=True, exist_ok=True)
-    compressed = max(0, int(archive_size or ZIP_SIZE))
-    expanded = max(compressed, int(install_size or DEFAULT_CLIENT_EXPANDED_SIZE))
-    required = compressed + expanded + max(0, int(reserve_bytes))
-    free = shutil.disk_usage(destination).free
-    if free < required:
-        raise RuntimeError(
-            "Недостаточно места для установки LEDERG CR:MP.\\n\\n"
-            f"Нужно примерно {required / (1024 ** 3):.1f} ГБ "
-            f"(архив + файлы игры + резерв), доступно {free / (1024 ** 3):.1f} ГБ."
-        )
-    return required
+def _is_google_drive_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    query = parse_qs(parsed.query)
+    return bool(
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() in {
+            "drive.usercontent.google.com",
+            "drive.google.com",
+        }
+        and parsed.path in {"/download", "/uc"}
+        and query.get("id", [""])[0] == DRIVE_FILE_ID
+    )
 
 
-def download_archive_parallel(
-    destination: Path,
-    url: str,
-    *,
-    total_size: int,
-    expected_sha256: str = "",
-    etag: str | None = None,
-    progress=None,
-    cancel=None,
-    workers: int = PARALLEL_DOWNLOAD_WORKERS,
-    http=None,
-) -> Path:
-    """Download a large ZIP using resumable parallel HTTP Range requests."""
-    client_http = http or HTTP
-    if total_size <= 0:
-        raise ValueError("Размер ZIP для параллельной загрузки должен быть известен.")
+def _validate_client_archive_source(url: str) -> str:
+    """Reject all client archive sources except the one user-supplied Drive file."""
+    if not _is_google_drive_url(url):
+        raise ValueError("Игровой клиент разрешено скачивать только из указанного Google Drive.")
+    return url
 
-    destination.mkdir(parents=True, exist_ok=True)
-    complete = destination / ".lederg-crmp-download.zip"
-    partial = destination / ".lederg-crmp-download.zip.part"
-    metadata_path = destination / ".lederg-crmp-download.zip.parallel.json"
-    count = max(1, min(int(workers), total_size))
-    chunk_paths = [
-        destination / f".lederg-crmp-download.zip.part.{index:02d}"
-        for index in range(count)
-    ]
-    digest_expected = str(expected_sha256 or "").lower().strip()
 
-    def archive_matches(candidate: Path) -> bool:
-        if not candidate.is_file() or candidate.stat().st_size != total_size:
-            return False
-        if not zipfile.is_zipfile(candidate):
-            return False
-        if digest_expected:
-            digest = hashlib.sha256()
-            with candidate.open("rb") as stream:
-                for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-                    digest.update(block)
-            if digest.hexdigest().lower() != digest_expected:
-                return False
-        return True
-
-    if archive_matches(complete):
-        return complete
-    complete.unlink(missing_ok=True)
-
-    meta = {
-        "url": url,
-        "total_size": int(total_size),
-        "etag": str(etag or ""),
-        "workers": count,
-    }
-    previous_meta = None
-    try:
-        previous_meta = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        pass
-    if previous_meta != meta:
-        for chunk_path in chunk_paths:
-            chunk_path.unlink(missing_ok=True)
-        metadata_path.write_text(json.dumps(meta, sort_keys=True), encoding="utf-8")
-
-    chunk_bounds = []
-    for index in range(count):
-        start = index * total_size // count
-        end = ((index + 1) * total_size // count) - 1
-        chunk_bounds.append((start, end))
-
-    # Probe the actual download endpoint before opening several large streams.
-    # A stale proxy or HTML virus-scan page must not be appended to a ZIP.
-    try:
-        with client_http.get(
-            url,
-            headers={"Range": "bytes=0-0", "Accept-Encoding": "identity"},
-            stream=True,
-            allow_redirects=True,
-            timeout=(20, 30),
-        ) as probe:
-            if probe.status_code != 206:
-                raise ParallelRangeUnsupported("Источник не поддерживает HTTP Range.")
-            match = re.fullmatch(
-                r"bytes\s+0-0/(\d+)", probe.headers.get("Content-Range", ""), re.I
+def _google_drive_confirmation_url(
+    response_url: str, html: str, cookies: dict[str, str] | None = None
+) -> str:
+    """Resolve Google's large-file virus-scan confirmation page without downloading its HTML."""
+    cookies = cookies or {}
+    # Prefer Google's confirmation form because it may carry additional UUID parameters.
+    form = re.search(
+        r"<form\b([^>]*)>(.*?)</form\s*>", html, flags=re.I | re.S
+    )
+    if form:
+        attrs = {
+            key.lower(): unescape(value1 if value1 is not None else value2 if value2 is not None else value3 or "")
+            for key, value1, value2, value3 in re.findall(
+                r"([\w:-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+                form.group(1),
+                flags=re.I,
             )
-            if not match or int(match.group(1)) != total_size:
-                raise ParallelRangeUnsupported("Источник некорректно обрабатывает HTTP Range.")
-            if "text/html" in (probe.headers.get("Content-Type") or "").lower():
-                raise ParallelRangeUnsupported("Источник вернул HTML вместо ZIP.")
-            first = next(probe.iter_content(chunk_size=1), b"")
-            if first != b"P":
-                raise RuntimeError("Ответ Range не похож на начало ZIP-архива.")
-    except ParallelRangeUnsupported:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"Не удалось проверить параллельную загрузку: {exc}") from exc
-
-    abort = threading.Event()
-    unsupported = threading.Event()
-    progress_lock = threading.Lock()
-    first_error: list[Exception] = []
-
-    def update_progress(index: int) -> None:
-        if progress is None:
-            return
-        with progress_lock:
-            done = sum(p.stat().st_size for p in chunk_paths if p.is_file())
-        progress("download", min(done, total_size), total_size, f"GTA Criminal Russia.zip · канал {index + 1}/{count}")
-
-    def fetch_chunk(index: int) -> None:
-        start, end = chunk_bounds[index]
-        chunk_path = chunk_paths[index]
-        chunk_size = end - start + 1
-        if chunk_path.is_file() and chunk_path.stat().st_size > chunk_size:
-            chunk_path.unlink()
-        if chunk_path.is_file() and chunk_path.stat().st_size == chunk_size:
-            update_progress(index)
-            return
-
-        last_error = None
-        for attempt in range(4):
-            if cancel is not None and cancel.is_set():
-                raise InterruptedError("Загрузка остановлена. Частичные диапазоны сохранены.")
-            if abort.is_set():
-                raise InterruptedError("Загрузка остановлена из-за ошибки соседнего потока.")
-            if unsupported.is_set():
-                raise ParallelRangeUnsupported("Сервер не поддержал параллельные диапазоны.")
-
-            offset = chunk_path.stat().st_size if chunk_path.is_file() else 0
-            if offset > chunk_size:
-                chunk_path.unlink(missing_ok=True)
-                offset = 0
-            range_start = start + offset
-            headers = {
-                "Range": f"bytes={range_start}-{end}",
-                "Accept-Encoding": "identity",
+        }
+        action = attrs.get("action")
+        fields = {}
+        for tag in re.findall(r"<input\b([^>]*)>", form.group(2), flags=re.I | re.S):
+            values = {
+                key.lower(): unescape(v1 if v1 is not None else v2 if v2 is not None else v3 or "")
+                for key, v1, v2, v3 in re.findall(
+                    r"([\w:-]+)\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+))",
+                    tag,
+                    flags=re.I,
+                )
             }
-            if etag and offset:
-                headers["If-Range"] = etag
+            if values.get("name") and "value" in values:
+                fields[values["name"]] = values["value"]
+        if fields.get("confirm"):
+            target = urljoin(response_url, action or response_url)
+            parts = urlparse(target)
+            query = parse_qs(parts.query, keep_blank_values=True)
+            query.update({key: [value] for key, value in fields.items()})
+            confirmed = urlunparse(parts._replace(query=urlencode(query, doseq=True)))
+            return _validate_client_archive_source(confirmed)
 
-            try:
-                with client_http.get(
-                    url,
-                    headers=headers,
-                    stream=True,
-                    allow_redirects=True,
-                    timeout=(20, 90),
-                ) as response:
-                    if response.status_code == 200:
-                        unsupported.set()
-                        raise ParallelRangeUnsupported("Сервер проигнорировал HTTP Range.")
-                    if response.status_code != 206:
-                        response.raise_for_status()
-                        raise RuntimeError(f"Неожиданный HTTP {response.status_code} для диапазона.")
-                    match = re.fullmatch(
-                        r"bytes\s+(\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", ""), re.I
-                    )
-                    if (
-                        not match
-                        or int(match.group(1)) != range_start
-                        or int(match.group(2)) != end
-                        or int(match.group(3)) != total_size
-                    ):
-                        raise RuntimeError("Источник вернул некорректный Content-Range.")
-                    content_type = (response.headers.get("Content-Type") or "").lower()
-                    if "text/html" in content_type:
-                        raise RuntimeError("Источник вернул HTML вместо ZIP.")
-                    received = offset
-                    first_chunk = offset == 0 and index == 0
-                    with chunk_path.open("ab" if offset else "wb") as output:
-                        for block in response.iter_content(chunk_size=1024 * 1024):
-                            if cancel is not None and cancel.is_set():
-                                output.flush()
-                                raise InterruptedError("Загрузка остановлена. Частичные диапазоны сохранены.")
-                            if abort.is_set() or unsupported.is_set():
-                                raise InterruptedError("Параллельная загрузка остановлена.")
-                            if not block:
-                                continue
-                            if first_chunk:
-                                first_chunk = False
-                                if not block.startswith(b"PK"):
-                                    raise RuntimeError("Первый диапазон не содержит сигнатуру ZIP.")
-                            output.write(block)
-                            received += len(block)
-                            update_progress(index)
+    token = ""
+    for name, value in cookies.items():
+        if name.lower().startswith("download_warning") and value:
+            token = value
+            break
+    if not token:
+        for pattern in (
+            r"name\s*=\s*[\"']confirm[\"'][^>]*value\s*=\s*[\"']([^\"']+)",
+            r"value\s*=\s*[\"']([^\"']+)[\"'][^>]*name\s*=\s*[\"']confirm[\"']",
+            r"[?&]confirm=([A-Za-z0-9_-]+)",
+        ):
+            match = re.search(pattern, html, flags=re.I)
+            if match:
+                token = unescape(match.group(1))
+                break
+    parts = urlparse(response_url)
+    query = parse_qs(parts.query, keep_blank_values=True)
+    if token:
+        query["confirm"] = [token]
+    elif query.get("confirm"):
+        return _validate_client_archive_source(response_url)
+    else:
+        raise RuntimeError(
+            "Google Drive запросил подтверждение загрузки, но токен не найден. "
+            "Проверь доступ «Все, у кого есть ссылка» к архиву."
+        )
+    confirmed = urlunparse(parts._replace(query=urlencode(query, doseq=True)))
+    return _validate_client_archive_source(confirmed)
 
-                if received != chunk_size or chunk_path.stat().st_size != chunk_size:
-                    raise ConnectionError(
-                        f"Диапазон {index + 1}/{count} загружен не полностью "
-                        f"({chunk_path.stat().st_size}/{chunk_size} байт)."
-                    )
-                update_progress(index)
-                return
-            except (ParallelRangeUnsupported, InterruptedError):
-                raise
-            except Exception as exc:
-                last_error = exc
-                if attempt < 3:
-                    time.sleep(0.4 * (attempt + 1))
-        raise RuntimeError(f"Не удалось загрузить диапазон {index + 1}/{count}: {last_error}") from last_error
 
-    with ThreadPoolExecutor(max_workers=count, thread_name_prefix="LEDERG-range") as pool:
-        futures = [pool.submit(fetch_chunk, index) for index in range(count)]
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except ParallelRangeUnsupported as exc:
-                unsupported.set()
-                abort.set()
-                if not first_error:
-                    first_error.append(exc)
-                for item in futures:
-                    item.cancel()
-            except InterruptedError as exc:
-                if not first_error:
-                    first_error.append(exc)
-                abort.set()
-                for item in futures:
-                    item.cancel()
-            except Exception as exc:
-                if not first_error:
-                    first_error.append(exc)
-                abort.set()
-                for item in futures:
-                    item.cancel()
-
-    if unsupported.is_set():
-        raise ParallelRangeUnsupported(str(first_error[0]) if first_error else "HTTP Range недоступен.")
-    if first_error:
-        raise RuntimeError(f"Параллельная загрузка не завершена: {first_error[0]}") from first_error[0]
-    if cancel is not None and cancel.is_set():
-        raise InterruptedError("Загрузка остановлена. Частичные диапазоны сохранены.")
-
-    with partial.open("wb") as output:
-        for index, chunk_path in enumerate(chunk_paths):
-            start, end = chunk_bounds[index]
-            if not chunk_path.is_file() or chunk_path.stat().st_size != end - start + 1:
-                raise RuntimeError(f"Не найден полный диапазон {index + 1}/{count}.")
-            with chunk_path.open("rb") as chunk:
-                shutil.copyfileobj(chunk, output, length=8 * 1024 * 1024)
-
-    if partial.stat().st_size != total_size or not archive_matches(partial):
-        partial.unlink(missing_ok=True)
-        # Keep range parts for a diagnosable/retryable failure only if the server
-        # did not produce the expected complete byte count. Bad full archives are
-        # discarded so retrying will not repeatedly assemble corrupt bytes.
-        for chunk_path in chunk_paths:
-            chunk_path.unlink(missing_ok=True)
-        metadata_path.unlink(missing_ok=True)
-        raise RuntimeError("ZIP не прошёл проверку размера, структуры или SHA-256.")
-
-    partial.replace(complete)
-    for chunk_path in chunk_paths:
-        chunk_path.unlink(missing_ok=True)
-    metadata_path.unlink(missing_ok=True)
-    if progress:
-        progress("download", total_size, total_size, "ZIP скачан параллельными каналами и проверен")
-    return complete
-
+def _open_google_drive_response(
+    url: str, headers: dict[str, str] | None = None, timeout=(20, 60)
+):
+    """Open the pinned Drive file, automatically handling the large-file confirmation page."""
+    _validate_client_archive_source(url)
+    request_headers = headers or {}
+    response = HTTP.get(
+        url,
+        headers=request_headers,
+        stream=True,
+        allow_redirects=True,
+        timeout=timeout,
+    )
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    if "text/html" not in content_type:
+        return response, url
+    body = bytearray()
+    for chunk in response.iter_content(chunk_size=64 * 1024):
+        if chunk:
+            body.extend(chunk)
+            if len(body) > 2 * 1024 * 1024:
+                response.close()
+                raise RuntimeError("Google Drive вернул слишком большую HTML-страницу вместо подтверждения.")
+    response_url = response.url
+    cookies = response.cookies.get_dict()
+    response.close()
+    confirmed_url = _google_drive_confirmation_url(
+        response_url, body.decode("utf-8", errors="replace"), cookies
+    )
+    confirmed = HTTP.get(
+        confirmed_url,
+        headers=request_headers,
+        stream=True,
+        allow_redirects=True,
+        timeout=timeout,
+    )
+    confirmed_type = (confirmed.headers.get("Content-Type") or "").lower()
+    if "text/html" in confirmed_type:
+        confirmed.close()
+        raise RuntimeError(
+            "Google Drive снова вернул HTML вместо архива. "
+            "Проверь, что файл доступен по ссылке и не требует авторизации."
+        )
+    return confirmed, confirmed_url
 
 
 def download_archive(destination: Path, progress=None, cancel=None, url: str = ZIP_URL,
@@ -1057,9 +1579,11 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
     Download a ZIP from the LEDERG HTTP endpoint. Supports Range resume,
     validates server responses, and keeps partial files after interruptions.
     """
+    _validate_client_archive_source(url)
     destination.mkdir(parents=True, exist_ok=True)
-    partial = destination / ".lederg-crmp-download.zip.part"
-    complete = destination / ".lederg-crmp-download.zip"
+    # Keep this file separate from archives downloaded by older builds from Cloudpub.
+    partial = destination / ".lederg-crmp-google-drive.zip.part"
+    complete = destination / ".lederg-crmp-google-drive.zip"
 
     def archive_matches(candidate: Path) -> bool:
         if not candidate.is_file() or not zipfile.is_zipfile(candidate):
@@ -1093,17 +1617,24 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
             progress("download", size, size, "Готовый архив восстановлен")
         return complete
 
+    _validate_client_archive_source(url)
     try:
-        head = HTTP.head(
-            url, allow_redirects=True, timeout=(20, 30)
+        probe, resolved_url = _open_google_drive_response(
+            url, headers={}, timeout=(20, 45)
         )
-        head.raise_for_status()
-        remote_size = int(head.headers.get("Content-Length") or 0)
-        etag = head.headers.get("ETag")
+        try:
+            probe.raise_for_status()
+            remote_size = int(probe.headers.get("Content-Length") or 0)
+            if probe.status_code == 206:
+                remote_size = _content_range_total(probe.headers.get("Content-Range")) or remote_size
+            etag = probe.headers.get("ETag")
+        finally:
+            probe.close()
+        url = resolved_url
     except Exception as exc:
         raise RuntimeError(
-            "Не удалось подключиться к серверу загрузки LEDERG. "
-            "Проверь интернет-соединение и доступность сервера.\n\n"
+            "Не удалось подключиться к указанному архиву Google Drive. "
+            "Проверь интернет-соединение и доступ «Все, у кого есть ссылка».\n\n"
             f"Детали: {exc}"
         ) from exc
 
@@ -1127,26 +1658,6 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
             f"Нужно примерно {need_gb:.1f} ГБ, доступно {free_gb:.1f} ГБ."
         )
 
-    if (
-        remote_size >= PARALLEL_DOWNLOAD_MIN_SIZE
-        and "bytes" in (head.headers.get("Accept-Ranges") or "").lower()
-    ):
-        try:
-            return download_archive_parallel(
-                destination,
-                url,
-                total_size=remote_size,
-                expected_sha256=expected_sha256,
-                etag=etag,
-                progress=progress,
-                cancel=cancel,
-            )
-        except ParallelRangeUnsupported as exc:
-            write_launcher_log(f"HTTP Range unavailable; switching to resumable single-stream download: {exc}")
-            for path in destination.glob(".lederg-crmp-download.zip.part.*"):
-                path.unlink(missing_ok=True)
-            (destination / ".lederg-crmp-download.zip.parallel.json").unlink(missing_ok=True)
-
     last_error: Exception | None = None
     for attempt in range(4):
         if cancel is not None and cancel.is_set():
@@ -1160,13 +1671,11 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
                 headers["If-Range"] = etag
 
         try:
-            with HTTP.get(
-                url,
-                headers=headers,
-                stream=True,
-                allow_redirects=True,
-                timeout=(20, 90),
-            ) as response:
+            response, resolved_url = _open_google_drive_response(
+                url, headers=headers, timeout=(20, 90)
+            )
+            url = resolved_url
+            with response:
                 if offset and response.status_code == 416:
                     if (
                         (not remote_size or partial.stat().st_size == remote_size)
@@ -1308,7 +1817,6 @@ def _file_crc32(path: Path) -> int:
     return checksum & 0xFFFFFFFF
 
 
-
 def download_client_folder(
     destination: Path,
     manifest_url: str,
@@ -1316,9 +1824,13 @@ def download_client_folder(
     cancel=None,
     http=None,
     manifest_payload: dict | None = None,
-    workers: int = PARALLEL_DOWNLOAD_WORKERS,
 ) -> tuple[Path, int]:
-    """Install/update files from a validated manifest using bounded parallel workers."""
+    """
+    Download a client as individual files into its install folder.
+
+    A manifest supplies safe relative paths, expected sizes, and CRC32 values.
+    Each file uses its own temporary .part file and can resume with HTTP Range.
+    """
     client_http = http or HTTP
     try:
         payload = (
@@ -1331,14 +1843,15 @@ def download_client_folder(
     except Exception as exc:
         raise RuntimeError(f"Не удалось получить манифест файлов клиента: {exc}") from exc
 
-    root_rel = PurePosixPath(payload["install_root"])
+    install_root_name = payload["install_root"]
+    root_rel = PurePosixPath(install_root_name)
     base_url = payload["files_base_url"]
     files = [
-        (PurePosixPath(item["path"]), int(item["size"]), int(item["crc32"], 16))
+        (PurePosixPath(item["path"]), item["size"], int(item["crc32"], 16))
         for item in payload["files"]
     ]
-    total_bytes = int(payload["total_bytes"])
-    if total_bytes <= 0 or not files:
+    total_bytes = payload["total_bytes"]
+    if total_bytes <= 0:
         raise ValueError("Манифест клиента не содержит файлов для загрузки.")
 
     destination.mkdir(parents=True, exist_ok=True)
@@ -1350,48 +1863,38 @@ def download_client_folder(
         raise ValueError("Папка установки выходит за пределы выбранного места.") from exc
     install_root.mkdir(parents=True, exist_ok=True)
 
-    progress_lock = threading.Lock()
-    stop_event = threading.Event()
-    file_progress = {relative.as_posix(): 0 for relative, _, _ in files}
-
-    def report_progress(name: str, value: int) -> None:
-        value = max(0, int(value))
-        with progress_lock:
-            file_progress[name] = value
-            total_done = min(total_bytes, sum(file_progress.values()))
-        if progress:
-            progress("download", total_done, total_bytes, name)
-
-    def download_one(item: tuple[PurePosixPath, int, int]) -> None:
-        relative, expected_size, expected_crc = item
-        rel_name = relative.as_posix()
+    completed_bytes = 0
+    for relative, expected_size, expected_crc in files:
         if cancel is not None and cancel.is_set():
             raise InterruptedError("Загрузка остановлена. Уже скачанные файлы сохранены.")
-        if stop_event.is_set():
-            raise InterruptedError("Загрузка остановлена из-за ошибки другого файла.")
 
         target = install_root.joinpath(*relative.parts)
         try:
+            # Resolve before creating parent directories so symlinks inside the
+            # install tree cannot cause writes outside the selected directory.
             resolved_target = target.resolve()
             resolved_target.relative_to(install_root)
         except ValueError as exc:
-            raise ValueError(f"Файл выходит за пределы папки установки: {rel_name}") from exc
+            raise ValueError(f"Файл выходит за пределы папки установки: {relative.as_posix()}") from exc
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if target.is_file() and target.stat().st_size == expected_size:
             if _file_crc32(target) == expected_crc:
-                report_progress(rel_name, expected_size)
-                return
+                completed_bytes += expected_size
+                if progress:
+                    progress("download", completed_bytes, total_bytes, relative.as_posix())
+                continue
 
         part = target.with_name(target.name + ".lederg.part")
         if part.is_file() and part.stat().st_size == expected_size:
             if _file_crc32(part) == expected_crc:
                 part.replace(target)
-                report_progress(rel_name, expected_size)
-                return
+                completed_bytes += expected_size
+                if progress:
+                    progress("download", completed_bytes, total_bytes, relative.as_posix())
+                continue
         if part.is_file() and part.stat().st_size > expected_size:
             part.unlink()
-        report_progress(rel_name, part.stat().st_size if part.is_file() else 0)
 
         quoted_path = "/".join(quote(segment, safe="") for segment in relative.parts)
         file_url = base_url.rstrip("/") + "/" + quoted_path
@@ -1400,118 +1903,87 @@ def download_client_folder(
         for attempt in range(4):
             if cancel is not None and cancel.is_set():
                 raise InterruptedError("Загрузка остановлена. Частичный файл сохранён для продолжения.")
-            if stop_event.is_set():
-                raise InterruptedError("Загрузка остановлена из-за ошибки другого файла.")
 
             offset = part.stat().st_size if part.is_file() else 0
             if offset > expected_size:
                 part.unlink(missing_ok=True)
                 offset = 0
-            headers = {"Range": f"bytes={offset}-", "Accept-Encoding": "identity"} if offset else {}
+            headers = {"Range": f"bytes={offset}-"} if offset else {}
             checksum = _file_crc32(part) if offset else 0
 
             try:
                 with client_http.get(
-                    file_url, headers=headers, stream=True, timeout=(20, 90)
-                ) as response:
-                    if offset and response.status_code == 206:
+                    file_url, headers=headers, stream=True, timeout=(20, 60)
+                ) as file_response:
+                    if offset and file_response.status_code == 206:
                         match = re.fullmatch(
                             r"bytes\s+(\d+)-(\d+)/(\d+)",
-                            response.headers.get("Content-Range", ""), re.I
+                            file_response.headers.get("Content-Range", ""), re.I
                         )
-                        if (
-                            not match
-                            or int(match.group(1)) != offset
-                            or int(match.group(3)) != expected_size
-                        ):
-                            raise RuntimeError(f"Некорректный Range для {rel_name}")
+                        if not match or int(match.group(1)) != offset or int(match.group(3)) != expected_size:
+                            raise RuntimeError(f"Сервер вернул некорректный Range для {relative.as_posix()}")
                         write_mode = "ab"
                     else:
-                        if response.status_code not in (200, 206):
-                            response.raise_for_status()
-                        if response.status_code == 206:
+                        if file_response.status_code not in (200, 206):
+                            file_response.raise_for_status()
+                        if file_response.status_code == 206:
                             match = re.fullmatch(
                                 r"bytes\s+(\d+)-(\d+)/(\d+)",
-                                response.headers.get("Content-Range", ""), re.I
+                                file_response.headers.get("Content-Range", ""), re.I
                             )
-                            if (
-                                not match
-                                or int(match.group(1)) != 0
-                                or int(match.group(3)) != expected_size
-                            ):
-                                raise RuntimeError(f"Некорректный Range для {rel_name}")
+                            if not match or int(match.group(1)) != 0 or int(match.group(3)) != expected_size:
+                                raise RuntimeError(f"Сервер вернул некорректный Range для {relative.as_posix()}")
                         offset = 0
                         checksum = 0
                         write_mode = "wb"
 
-                    content_type = (response.headers.get("Content-Type") or "").lower()
-                    if "text/html" in content_type:
-                        raise RuntimeError(f"Сервер вернул HTML вместо файла {rel_name}")
                     received = offset
                     with part.open(write_mode) as output:
-                        for block in response.iter_content(chunk_size=1024 * 1024):
+                        for chunk in file_response.iter_content(chunk_size=1024 * 1024):
                             if cancel is not None and cancel.is_set():
-                                output.flush()
                                 raise InterruptedError(
                                     "Загрузка остановлена. Частичный файл сохранён для продолжения."
                                 )
-                            if stop_event.is_set():
-                                output.flush()
-                                raise InterruptedError("Загрузка остановлена из-за ошибки другого файла.")
-                            if not block:
+                            if not chunk:
                                 continue
-                            output.write(block)
-                            checksum = zlib.crc32(block, checksum)
-                            received += len(block)
-                            report_progress(rel_name, received)
+                            output.write(chunk)
+                            checksum = zlib.crc32(chunk, checksum)
+                            received += len(chunk)
+                            if progress:
+                                progress(
+                                    "download", completed_bytes + received,
+                                    total_bytes, relative.as_posix()
+                                )
 
                 if received != expected_size or part.stat().st_size != expected_size:
                     raise ConnectionError(
-                        f"Файл {rel_name} скачан не полностью "
+                        f"Файл {relative.as_posix()} скачан не полностью "
                         f"({part.stat().st_size}/{expected_size} байт)."
                     )
                 if (checksum & 0xFFFFFFFF) != expected_crc:
                     part.unlink(missing_ok=True)
-                    report_progress(rel_name, 0)
-                    raise RuntimeError(f"Контрольная сумма не совпала: {rel_name}")
+                    raise RuntimeError(f"Контрольная сумма не совпала: {relative.as_posix()}")
                 part.replace(target)
-                report_progress(rel_name, expected_size)
+                completed_bytes += expected_size
+                if progress:
+                    progress("download", completed_bytes, total_bytes, relative.as_posix())
                 last_error = None
-                return
+                break
             except InterruptedError:
                 raise
             except Exception as exc:
                 last_error = exc
                 if part.is_file() and part.stat().st_size >= expected_size:
                     part.unlink(missing_ok=True)
-                    report_progress(rel_name, 0)
                 if attempt < 3:
-                    time.sleep(min(0.4 * (attempt + 1), 1.5))
+                    time.sleep(min(attempt + 1, 2))
 
-        raise RuntimeError(
-            f"Не удалось скачать файл клиента {rel_name} после 4 попыток: {last_error}"
-        ) from last_error
+        if last_error is not None:
+            raise RuntimeError(
+                f"Не удалось скачать файл клиента {relative.as_posix()} после 4 попыток: {last_error}"
+            ) from last_error
 
-    thread_count = max(1, min(int(workers), len(files)))
-    first_error: list[Exception] = []
-    with ThreadPoolExecutor(max_workers=thread_count, thread_name_prefix="LEDERG-file") as pool:
-        futures = [pool.submit(download_one, item) for item in files]
-        for future in as_completed(futures):
-            try:
-                future.result()
-            except Exception as exc:
-                if not first_error:
-                    first_error.append(exc)
-                    stop_event.set()
-                    for other in futures:
-                        other.cancel()
-    if first_error:
-        error = first_error[0]
-        if isinstance(error, (ValueError, InterruptedError)):
-            raise error
-        raise RuntimeError(f"Обновление файлов прервано: {error}") from error
     return install_root, len(files)
-
 
 def rounded_polygon(canvas: tk.Canvas, x1: float, y1: float, x2: float, y2: float,
                     radius: float, **kwargs):
@@ -1998,10 +2470,7 @@ class LedgerLauncher(tk.Tk):
             count = 0
             archive = None
             installed_manifest = None
-            use_manifest_update = bool(release.get("files_manifest_url")) and should_use_manifest_update(
-                destination, release.get("client_executable")
-            )
-            if use_manifest_update:
+            if release.get("files_manifest_url"):
                 installed_manifest = fetch_files_manifest(release["files_manifest_url"], http=HTTP)
                 self.events.put((
                     "phase", "download", "СКАЧИВАЮ ОБНОВЛЁННЫЕ ФАЙЛЫ…",
@@ -2017,11 +2486,6 @@ class LedgerLauncher(tk.Tk):
                     manifest_payload=installed_manifest,
                 )
             else:
-                ensure_install_space(
-                    destination,
-                    int(release.get("archive_size", 0) or ZIP_SIZE),
-                    int(installed_manifest.get("total_bytes", 0) or 0) if installed_manifest else 0,
-                )
                 archive = download_archive(
                     destination,
                     progress=lambda phase, done, total, label: self.events.put(
@@ -2265,35 +2729,29 @@ class LedgerLauncher(tk.Tk):
             self.server_host, self.server_port = load_server_address(self.server_cache_file)
             root = game_root_for(client)
             launch_mode = getattr(self, "launch_mode", DEFAULT_LAUNCH_MODE)
-            if launch_mode in {"direct", "samp-cli"}:
-                # Use the client's own bootstrapper: it selects the correct game
-                # image and initializes Multiplayer adaptation before connecting.
-                register_samp_game(root, nickname)
-                dependency = ensure_legacy_directx_dependency(root)
-                game_client = find_client(root, DEFAULT_CLIENT_EXECUTABLE)
-                if game_client is None:
+            if launch_mode == "direct":
+                helper = direct_launcher_path().resolve()
+                if not helper.is_file():
                     raise FileNotFoundError(
-                        "Не найден штатный клиент multiplayer_c/multiplayer_browser_cr.exe. "
-                        "Запусти «Скачать / восстановить файлы»."
+                        "В сборке отсутствует LEDERG-DirectLaunch.exe. "
+                        "Скачай последнюю версию лаунчера и запусти её повторно."
                     )
-                command = build_launch_command(
-                    game_client, self.server_host, self.server_port, nickname, "samp-cli"
+                command = build_direct_launcher_command(
+                    helper, root, self.server_host, self.server_port, nickname
                 )
                 write_launcher_log(
-                    f"Starting official CR:MP bootstrapper: executable={game_client}; "
-                    f"DirectX={dependency}; cwd={root}; "
-                    f"endpoint={self.server_host}:{self.server_port}; nickname={nickname}"
+                    f"Starting hidden direct-connect helper; helper={helper}; "
+                    f"game={root / 'gta_sa.exe'}; dll={root / 'multiplayer_c' / 'san_andreas_multiplayer.dll'}; "
+                    f"cwd={root}; endpoint={self.server_host}:{self.server_port}; nickname={nickname}"
                 )
                 self.status_text = (
-                    f"ПОДКЛЮЧАЮ К {self.server_host}:{self.server_port} — ШТАТНЫЙ ЗАПУСК"
+                    f"ПОДКЛЮЧАЮ К {self.server_host}:{self.server_port} — БЕЗ БРАУЗЕРА"
                 )
                 self.draw()
-                self.game_process = subprocess.Popen(
-                    command, cwd=str(root), stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
-                )
+                self.game_process = spawn_direct_launcher(command, root)
                 write_launcher_log(
-                    f"Official CR:MP bootstrapper started; pid={self.game_process.pid}"
+                    f"Hidden direct-connect helper started; pid={self.game_process.pid}; "
+                    f"endpoint={self.server_host}:{self.server_port}"
                 )
             elif launch_mode == "browser-ui":
                 self.status_text = f"ОТКРЫВАЮ CR:MP — {self.server_host}:{self.server_port}"

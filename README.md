@@ -2,22 +2,14 @@
 
 Native Windows launcher with a live HTML/CSS/JavaScript interface delivered from this repository. The EXE remains necessary: a normal website is not allowed to access local game files or launch a Windows process.
 
-## How updates work
+## Runtime updates and self-healing client checks
 
-- At startup, bootstrap.py retrieves runtime-manifest.json from the main branch.
-- The manifest is allow-listed and every runtime file is checked against its exact byte size and SHA-256 hash before use.
-- The last verified version is cached in %LOCALAPPDATA%\LEDERG CRMP\runtime. When GitHub is unavailable, the launcher falls back to the verified cache or embedded first-run files.
-- UI edits in web/index.html and changes to the runtime modules are picked up on the next launch without downloading a new EXE. Play uses the official `multiplayer_c/multiplayer_browser_cr.exe` bootstrap with `host:port -n nickname`; it must initialize Multiplayer adaptation itself. Starting `grand_theft_auto_san_andreas.dll` directly or injecting `san_andreas_multiplayer.dll` into `gta_sa.exe` bypasses the custom client's game-type detection and produces “Не могу определить тип игры.”
-- Before Play, the launcher writes `HKCU\\Software\\SAMP\\gta_sa_exe` to the selected `gta_sa.exe` and installs the bundled x86 `d3dx9_25.dll` only after checking its pinned SHA-256. The original DLL is from Microsoft's DirectX legacy redistributable (June 2010).
-- Game files are updated independently through the existing client manifest, with per-file CRC validation and resumable downloads.
-
-## LEDERG COMMAND / accelerated client transfer
-
-- First-time install: download the compressed client ZIP using up to **8 parallel HTTP Range streams** when the origin supports byte ranges. Every part can resume after an interruption; the final archive is reassembled and checked as a ZIP, with SHA-256 verification when the release manifest provides a digest.
-- Existing install: compare the Cloudpub per-file manifest and fetch only missing or changed files, using up to **8 parallel workers**, per-file CRC32 checks and resumable `.lederg.part` files.
-- The launcher shows live throughput (MiB/s), percentage and estimated time remaining. It checks free space before downloading so the compressed archive and extracted game can coexist safely.
-- Runtime support for Range is probed before parallel download; if an origin ignores Range, the installer safely falls back to the resumable single-stream path.
-- The visual interface is the LEDERG COMMAND black/red HUD and includes an explicit transfer engine status.
+- At startup, `bootstrap.py` retrieves `runtime-manifest.json` from `main`. Runtime files are allow-listed and verified against byte size and SHA-256 before loading; the last verified copy is cached under `%LOCALAPPDATA%\LEDERG CRMP\runtime`.
+- UI edits and runtime-module changes can be delivered through the verified manifest without rebuilding the EXE. The Play path starts the bundled `LEDERG-DirectLaunch.exe` helper invisibly, launches `gta_sa.exe`, loads `multiplayer_c/san_andreas_multiplayer.dll`, and passes the configured host, port, and nickname. It does not open `multiplayer_browser_cr.exe`; the helper's console is suppressed on Windows.
+- The client checker validates the CR:MP folder layout, required binaries and x86 PE headers. The per-file manifest records the installed release fingerprint and per-file CRC32/size, so an old or modified client is detected even when its folder name is unchanged. On later starts it checks critical binaries and modified files; a complete integrity pass is performed weekly.
+- Client installation and repair prefer the live CloudPub per-file manifest (`client-manifest.json`). The launcher compares each local file against the release size/CRC32, skips matching files, resumes interrupted downloads, and downloads only missing or changed files. The Google Drive ZIP remains a fallback for older release manifests. After `0xC0000005`, it attempts to collect Windows Application Error / WER records and then performs at most one automatic full-client repair per installation every 24 hours. This prevents endless download/crash loops.
+- The supplied CR:MP folder contains an ENB `d3d9.dll` graphics proxy. The launcher disables it only when Windows identifies that exact local file as the faulting module and the ENB configuration/license files are present. The original DLL is preserved as `d3d9.dll.lederg-disabled.bak`; system DLLs are never changed.
+- Legacy installations without an integrity ledger are checked for required structure and PE headers first. Their trusted file baseline is created after a successful archive-based repair/reinstall.
 
 ## Development
 
@@ -30,7 +22,7 @@ Use Python 3.14 x64 on Windows.
    `%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe /nologo /platform:x86 /target:exe /out:LEDERG-DirectLaunch.exe direct_launcher.cs`
 5. Build with: pyinstaller --clean --noconfirm "LEDERG CRMP.spec"
 
-Run tools/update_runtime_manifest.py after changing launcher.py, client_updates.py, radio_sync.py, web_runtime.py, or web/index.html; commit the updated manifest in the same change. The default launch mode is `samp-cli`, and the runtime monitor tracks the actual game process after `multiplayer_browser_cr.exe` exits.
+Run tools/update_runtime_manifest.py after changing launcher.py, client_updates.py, radio_sync.py, web_runtime.py, or web/index.html; commit the updated manifest in the same change.
 
 ## Release model
 
