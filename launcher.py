@@ -1520,10 +1520,10 @@ def _google_drive_confirmation_url(
     elif query.get("confirm"):
         return _validate_client_archive_source(response_url)
     else:
-        raise RuntimeError(
-            "Google Drive запросил подтверждение загрузки, но токен не найден. "
-            "Проверь доступ «Все, у кого есть ссылка» к архиву."
-        )
+        # Google Drive sometimes omits both the warning cookie and a usable
+        # confirmation form for large shared files. Its web flow also accepts
+        # confirm=t; try that before failing the download.
+        query["confirm"] = ["t"]
     confirmed = urlunparse(parts._replace(query=urlencode(query, doseq=True)))
     return _validate_client_archive_source(confirmed)
 
