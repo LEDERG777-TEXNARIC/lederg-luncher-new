@@ -27,6 +27,14 @@ jobs:
       - name: Run launcher regression tests
         run: python -m unittest discover -v
 
+      - name: Compile native direct-connect helper
+        shell: pwsh
+        run: |
+          $compiler = Join-Path $env:WINDIR "Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          if (!(Test-Path $compiler)) { throw "C# compiler not found: $compiler" }
+          & $compiler /nologo /platform:x86 /target:exe /out:LEDERG-DirectLaunch.exe direct_launcher.cs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build Windows x64 launcher
         run: pyinstaller --clean --noconfirm "LEDERG CRMP.spec"
 
