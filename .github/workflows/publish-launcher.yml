@@ -1,0 +1,49 @@
+name: Build and publish LEDERG launcher
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-build-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run launcher regression tests
+        run: python -m unittest discover -v
+
+      - name: Build Windows x64 launcher
+        run: pyinstaller --clean --noconfirm "LEDERG CRMP.spec"
+
+      - name: Read runtime version
+        id: version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content runtime-manifest.json -Raw | ConvertFrom-Json
+          "version=$($manifest.version)" >> $env:GITHUB_OUTPUT
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: launcher-v${{ steps.version.outputs.version }}-${{ github.run_number }}
+          name: LEDERG CR:MP Launcher ${{ steps.version.outputs.version }} (build ${{ github.run_number }})
+          generate_release_notes: true
+          files: |
+            dist/LEDERG CRMP.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
