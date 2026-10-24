@@ -104,7 +104,6 @@ def validate_manifest(payload: dict) -> dict:
     files.sort(key=lambda item: item["path"].casefold())
     canonical = {
         "install_root": root_rel.parts[0],
-        "version": version,
         "files": files,
     }
     digest = hashlib.sha256(
