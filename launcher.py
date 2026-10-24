@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import ipaddress
+import itertools
 import json
 import os
 import queue
@@ -1737,7 +1738,7 @@ def download_archive(destination: Path, progress=None, cancel=None, url: str = Z
                     prefetched = getattr(response, "_lederg_prefetched_chunk", b"")
                     stream_chunks = response.iter_content(chunk_size=1024 * 1024)
                     if prefetched:
-                        stream_chunks = iter((prefetched, *stream_chunks))
+                        stream_chunks = itertools.chain((prefetched,), stream_chunks)
                     for chunk in stream_chunks:
                         if cancel is not None and cancel.is_set():
                             output.flush()
