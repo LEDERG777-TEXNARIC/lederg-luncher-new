@@ -104,6 +104,7 @@ def validate_manifest(payload: dict) -> dict:
     files.sort(key=lambda item: item["path"].casefold())
     canonical = {
         "install_root": root_rel.parts[0],
+        "version": version,
         "files": files,
     }
     digest = hashlib.sha256(
@@ -204,6 +205,7 @@ def inspect_installation(install_root: Path, manifest: dict) -> dict:
 
     state = _load_state(install_root)
     prior_fingerprint = str((state or {}).get("fingerprint", ""))
+    prior_version = str((state or {}).get("version", ""))
     prior_items = (state or {}).get("files", [])
     prior = {}
     for item in prior_items:
@@ -278,7 +280,10 @@ def inspect_installation(install_root: Path, manifest: dict) -> dict:
             "crc32": expected_crc, "mtime_ns": info.st_mtime_ns
         })
 
-    update_available = bool(missing or changed or removed)
+    # A release-version change is itself an update signal, even if file sizes/checksums happen to match.
+    # This prevents the launcher from treating an older recorded release as current.
+    version_changed = bool(state is not None and prior_version and prior_version != manifest["version"])
+    update_available = bool(missing or changed or removed or version_changed)
     report = {
         "update_available": update_available,
         "fingerprint": manifest["fingerprint"],
